@@ -28,7 +28,8 @@ import java.net.URLEncoder
 // =====================================================================================
 // 1. CẤU HÌNH
 // =====================================================================================
-private const val BASE_URL = "https://multiembed.mov"
+// ⭐ QUAY LẠI DOMAIN GỐC (Không bị nhà mạng chặn)
+private const val BASE_URL = "https://www.superembed.stream"
 private const val TMDB_BASE_URL = "https://tmdb-proxy.silentmist3590.workers.dev/3"
 private const val TMDB_API_KEY = "c3d997893bf55c01f39f821b53781547"
 private const val IMG_PROXY = "https://wsrv.nl/?url="
@@ -220,7 +221,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // WEBVIEW SNIFFER (Tối ưu cho Cloudflare Turnstile)
+    // WEBVIEW SNIFFER (Tối ưu cho Cloudflare)
     // =====================================================================================
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun sniffStream(pageUrl: String, referer: String, ua: String, seen: MutableList<String>): SniffResult? {
@@ -266,12 +267,11 @@ class SuperembedProvider : MainAPI() {
                         mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                     }
 
-                    // Chặn popup
                     wv.webChromeClient = object : WebChromeClient() {
                         override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: android.os.Message?): Boolean = false
                     }
 
-                    // ⭐ Script đánh lừa Cloudflare (Xóa dấu vết bot)
+                    // ⭐ SCRIPT VƯỢT CLOUDFLARE
                     val antiBotJs = """
                         (function() {
                             Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
@@ -301,18 +301,18 @@ class SuperembedProvider : MainAPI() {
                             wv.dispatchTouchEvent(u)
                             d.recycle(); u.recycle()
                         } catch (_: Exception) {}
-                        if (taps < 60) handler.postDelayed({ tap() }, 1500) // Tăng số lần click
+                        if (taps < 60) handler.postDelayed({ tap() }, 1500) 
                     }
 
                     wv.webViewClient = object : WebViewClient() {
                         override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                            // Chạy script chống bot ngay khi trang bắt đầu tải
                             wv.evaluateJavascript(antiBotJs, null)
                         }
 
                         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                             val u = request?.url?.toString() ?: return null
 
+                            // Chỉ chặn quảng cáo, cho phép mọi redirect (tránh chặn nhầm domain của Cloudflare hoặc Player)
                             if (AD_DOMAINS.any { u.contains(it, ignoreCase = true) }) {
                                 seen.add("BLOCKED AD: " + u.take(100))
                                 return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream("".toByteArray()))
@@ -333,6 +333,7 @@ class SuperembedProvider : MainAPI() {
 
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                             val u = request?.url?.toString() ?: return false
+                            // Cho phép Cloudflare và các domain player tự do chuyển hướng
                             return AD_DOMAINS.any { u.contains(it, ignoreCase = true) }
                         }
 
@@ -385,13 +386,13 @@ class SuperembedProvider : MainAPI() {
             return false
         }
 
-        // ⭐ SỬ DỤNG MOBILE USER-AGENT ĐỂ QUA MẶT CLOUDFLARE
+        // ⭐ SỬ DỤNG MOBILE USER-AGENT
         val ua = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
         val embedUrl = if (type == "movie") {
-            "$BASE_URL/?video_id=$tmdbId&tmdb=1&autoPlay=true"
+            "$BASE_URL/?c=embed&video_id=$tmdbId&tmdb=1"
         } else {
-            "$BASE_URL/?video_id=$tmdbId&tmdb=1&s=$season&e=$episode&autoPlay=true"
+            "$BASE_URL/?c=embed&video_id=$tmdbId&tmdb=1&s=$season&e=$episode"
         }
 
         try {
