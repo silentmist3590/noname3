@@ -20,6 +20,11 @@ object LocalProxy {
     @Volatile private var server: ServerSocket? = null
     @Volatile var ua: String = ""
     @Volatile var referer: String = ""
+    @Volatile private var logged = 0
+
+    private fun log(msg: String) {
+        if (logged++ < 40) ClipboardLogger.logAndCopy("ProxyReq", msg)
+    }
 
     fun port(): Int = synchronized(this) {
         server?.let { return it.localPort }
@@ -63,6 +68,7 @@ object LocalProxy {
                 if (l.startsWith("Range:", true)) range = l.substring(6).trim()
             }
             val raw = first.split(" ").getOrNull(1) ?: return
+            log("in: ${first.take(60)} range=$range")
             val out = c.getOutputStream()
             if (raw.startsWith("/ping")) {
                 out.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".toByteArray())
@@ -79,6 +85,7 @@ object LocalProxy {
             conn.setRequestProperty("Accept-Encoding", "identity")
             if (range != null) conn.setRequestProperty("Range", range)
             val code = conn.responseCode
+            log("out: code=$code ct=${conn.contentType} len=${conn.contentLengthLong} url=${target.take(110)}")
             val stream = if (code >= 400) conn.errorStream else conn.inputStream
             val ct = conn.contentType ?: "application/octet-stream"
             val finalUrl = conn.url.toString()
@@ -107,7 +114,8 @@ object LocalProxy {
                 }
             }
             out.flush()
-        } catch (_: Throwable) {
+        } catch (e: Throwable) {
+            log("ERR ${e.javaClass.simpleName}: ${e.message}")
         } finally {
             try { c.close() } catch (_: Throwable) {}
         }
