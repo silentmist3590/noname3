@@ -228,23 +228,34 @@ class MovieuniverseProvider : MainAPI() {
         }
     }
 
-    private suspend fun emitStream(url: String, label: String, embed: String, callback: (ExtractorLink) -> Unit) {
+    private suspend fun variantsOf(masterUrl: String, h: Map<String, String>): List<Pair<Int?, String>> {
+        val mr = app.get(masterUrl, headers = h, timeout = 30)
+        val lines = mr.text.lines()
+        val out = ArrayList<Pair<Int?, String>>()
+        for (i in lines.indices) {
+            if (!lines[i].startsWith("#EXT-X-STREAM-INF")) continue
+            val uri = lines.drop(i + 1).firstOrNull { it.isNotBlank() && !it.startsWith("#") }?.trim() ?: continue
+            val height = Regex("RESOLUTION=\\d+x(\\d+)").find(lines[i])?.groupValues?.get(1)?.toIntOrNull()
+            out.add(height to absUrl(mr.url, uri))
+        }
+        return out
+    }
+
+    private suspend fun emitStream(url: String, label: String, embed: String, callback: (ExtractorLink) -> Unit, remint: (suspend () -> String?)? = null) {
         val origin = Regex("^https?://[^/]+").find(embed)?.value ?: mainUrl
         val isM3u8 = url.contains(".m3u8", true) || url.contains("/hls", true) || url.contains("playlist", true) || url.contains("_stream")
         val hFull = mapOf("User-Agent" to ua, "Origin" to origin, "Referer" to "$origin/")
+        var best: Map<String, String> = hFull
         if (isM3u8) {
             try {
-                val mr = app.get(url, headers = hFull, timeout = 30)
-                val master = mr.text
-                if (master.contains("#EXT-X-STREAM-INF")) {
-                    val base = mr.url
-                    val lines = master.lines()
-                    var emitted = 0
-                    for (i in lines.indices) {
-                        if (!lines[i].startsWith("#EXT-X-STREAM-INF")) continue
-                        val uri = lines.drop(i + 1).firstOrNull { it.isNotBlank() && !it.startsWith("#") }?.trim() ?: continue
-                        val height = Regex("RESOLUTION=\\d+x(\\d+)").find(lines[i])?.groupValues?.get(1)?.toIntOrNull()
-                        val vu = absUrl(base, uri)
+                // Lượt 1: dò (link dùng thử có thể bị "đốt"), tìm bộ header mà phân đoạn video chấp nhận
+                val vs = variantsOf(url, hFull)
+                if (vs.isNotEmpty()) {
+                    val vr = app.get(vs[0].second, headers = mapOf("User-Agent" to ua), timeout = 30)
+                    val seg = vr.text.lines().firstOrNull { it.startsWith("http") || (it.isNotBlank() && !it.startsWith("#")) }?.trim()
+                    ClipboardLogger.logAndCopy("VariantText $label", "code=${vr.code} seg=${seg?.take(300)}")
+                    if (seg != null) {
+                        val segUrl = absUrl(vr.url, seg)
                         val cands = listOf(
                             mapOf("User-Agent" to ua),
                             mapOf("User-Agent" to ua, "Referer" to "$origin/"),
@@ -252,26 +263,28 @@ class MovieuniverseProvider : MainAPI() {
                         )
                         for (h in cands) {
                             try {
-                                val vr = app.get(vu, headers = h, timeout = 30)
-                                ClipboardLogger.logAndCopy("Variant $label", "h=${h.keys} code=${vr.code} final=${vr.url}\n${vr.text.take(300)}")
-                                if (vr.code in 200..299 && vr.text.contains("#EXTM3U")) {
-                                    callback(
-                                        newExtractorLink(name, "$label ${height?.let { "${it}p" } ?: ""}".trim(), vr.url, ExtractorLinkType.M3U8) {
-                                            this.referer = h["Referer"] ?: ""
-                                            this.quality = height ?: Qualities.Unknown.value
-                                            this.headers = h
-                                        }
-                                    )
-                                    emitted++
-                                    break
-                                }
+                                val sr = app.get(segUrl, headers = h, timeout = 30)
+                                ClipboardLogger.logAndCopy("Segment $label", "h=${h.keys} code=${sr.code} ct=${sr.headers["content-type"]} len=${sr.headers["content-length"]}")
+                                if (sr.code in 200..299) { best = h; break }
                             } catch (e: Throwable) {
-                                ClipboardLogger.logAndCopy("Variant Error $label", e.message.orEmpty())
+                                ClipboardLogger.logAndCopy("Segment Error $label", "h=${h.keys} ${e.message}")
                             }
                         }
                     }
-                    if (emitted > 0) return
                 }
+                // Lượt 2: mint link mới, chỉ đọc playlist chính, phát playlist con CHƯA bị tải
+                val u2 = remint?.invoke() ?: url
+                val v2 = variantsOf(u2, best)
+                for ((height, vu) in v2) {
+                    callback(
+                        newExtractorLink(name, "$label ${height?.let { "${it}p" } ?: ""}".trim(), vu, ExtractorLinkType.M3U8) {
+                            this.referer = best["Referer"] ?: ""
+                            this.quality = height ?: Qualities.Unknown.value
+                            this.headers = best
+                        }
+                    )
+                }
+                if (v2.isNotEmpty()) return
             } catch (e: Throwable) {
                 ClipboardLogger.logAndCopy("Master Error $label", e.message.orEmpty())
             }
@@ -280,7 +293,7 @@ class MovieuniverseProvider : MainAPI() {
             newExtractorLink(name, label, url, if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
                 this.referer = "$origin/"
                 this.quality = Qualities.Unknown.value
-                this.headers = hFull
+                this.headers = best
             }
         )
     }
@@ -393,7 +406,12 @@ class MovieuniverseProvider : MainAPI() {
                                 val isMedia = Regex("""\.(m3u8|mp4|mkv|webm|mpd)(\?|$|#)""", RegexOption.IGNORE_CASE).containsMatchIn(u) ||
                                     kl in setOf("url", "file", "src", "stream", "hls", "link", "source", "playlist")
                                 if (isMedia && done.add(u)) {
-                                    emitStream(u, label, embed, callback)
+                                    emitStream(u, label, embed, callback, {
+                                        try {
+                                            val rr = app.get("$eOrigin/api.php?a=play&ref=" + URLEncoder.encode(ref, "UTF-8") + "&t=" + URLEncoder.encode(t, "UTF-8") + "&fresh=1", headers = eh, cookies = ck, timeout = 30)
+                                            JSONObject(rr.text).optString("url").replace("\\/", "/").takeIf { it.isNotBlank() }?.let { absUrl(embed, it) }
+                                        } catch (_: Throwable) { null }
+                                    })
                                     found = true
                                 }
                             }
