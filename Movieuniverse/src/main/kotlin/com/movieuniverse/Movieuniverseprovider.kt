@@ -243,48 +243,46 @@ class MovieuniverseProvider : MainAPI() {
 
     private suspend fun emitStream(url: String, label: String, embed: String, callback: (ExtractorLink) -> Unit, remint: (suspend () -> String?)? = null) {
         val origin = Regex("^https?://[^/]+").find(embed)?.value ?: mainUrl
-        val isM3u8 = url.contains(".m3u8", true) || url.contains("/hls", true) || url.contains("playlist", true) || url.contains("_stream")
-        val hFull = mapOf("User-Agent" to ua, "Origin" to origin, "Referer" to "$origin/")
-        var best: Map<String, String> = hFull
+        val isM3u8 = url.contains(".m3u8", true) || url.contains("/hls", true) || url.contains("playlist", true) || url.contains("_stream") || url.contains("cap.php")
+        // Phân đoạn video cần Referer (một số nguồn), không gửi Origin
+        val h = mapOf("User-Agent" to ua, "Referer" to "$origin/")
         if (isM3u8) {
             try {
-                // Lượt 1: dò (link dùng thử có thể bị "đốt"), tìm bộ header mà phân đoạn video chấp nhận
-                val vs = variantsOf(url, hFull)
-                if (vs.isNotEmpty()) {
-                    val vr = app.get(vs[0].second, headers = mapOf("User-Agent" to ua), timeout = 30)
-                    val seg = vr.text.lines().firstOrNull { it.startsWith("http") || (it.isNotBlank() && !it.startsWith("#")) }?.trim()
-                    ClipboardLogger.logAndCopy("VariantText $label", "code=${vr.code} seg=${seg?.take(300)}")
-                    if (seg != null) {
-                        val segUrl = absUrl(vr.url, seg)
-                        val cands = listOf(
-                            mapOf("User-Agent" to ua),
-                            mapOf("User-Agent" to ua, "Referer" to "$origin/"),
-                            hFull
-                        )
-                        for (h in cands) {
-                            try {
-                                val sr = app.get(segUrl, headers = h, timeout = 30)
-                                ClipboardLogger.logAndCopy("Segment $label", "h=${h.keys} code=${sr.code} ct=${sr.headers["content-type"]} len=${sr.headers["content-length"]}")
-                                if (sr.code in 200..299) { best = h; break }
-                            } catch (e: Throwable) {
-                                ClipboardLogger.logAndCopy("Segment Error $label", "h=${h.keys} ${e.message}")
+                val mr = app.get(url, headers = h, timeout = 30)
+                val txt = mr.text
+                val hasAudio = txt.contains("#EXT-X-MEDIA:TYPE=AUDIO")
+                if (!txt.contains("#EXTM3U")) {
+                    ClipboardLogger.logAndCopy("Master Bad $label", "code=${mr.code}\n${txt.take(200)}")
+                    return
+                }
+                if (!hasAudio && txt.contains("#EXT-X-STREAM-INF")) {
+                    val lines = txt.lines()
+                    var n = 0
+                    for (i in lines.indices) {
+                        if (!lines[i].startsWith("#EXT-X-STREAM-INF")) continue
+                        val uri = lines.drop(i + 1).firstOrNull { it.isNotBlank() && !it.startsWith("#") }?.trim() ?: continue
+                        val height = Regex("RESOLUTION=\\d+x(\\d+)").find(lines[i])?.groupValues?.get(1)?.toIntOrNull()
+                        callback(
+                            newExtractorLink(name, "$label ${height?.let { "${it}p" } ?: ""}".trim(), absUrl(mr.url, uri), ExtractorLinkType.M3U8) {
+                                this.referer = "$origin/"
+                                this.quality = height ?: Qualities.Unknown.value
+                                this.headers = h
                             }
-                        }
+                        )
+                        n++
                     }
+                    if (n > 0) return
                 }
-                // Lượt 2: mint link mới, chỉ đọc playlist chính, phát playlist con CHƯA bị tải
+                // Có nhiều track âm thanh: đưa nguyên playlist chính (link mới, chưa bị tải) cho trình phát
                 val u2 = remint?.invoke() ?: url
-                val v2 = variantsOf(u2, best)
-                for ((height, vu) in v2) {
-                    callback(
-                        newExtractorLink(name, "$label ${height?.let { "${it}p" } ?: ""}".trim(), vu, ExtractorLinkType.M3U8) {
-                            this.referer = best["Referer"] ?: ""
-                            this.quality = height ?: Qualities.Unknown.value
-                            this.headers = best
-                        }
-                    )
-                }
-                if (v2.isNotEmpty()) return
+                callback(
+                    newExtractorLink(name, label, u2, ExtractorLinkType.M3U8) {
+                        this.referer = "$origin/"
+                        this.quality = Qualities.Unknown.value
+                        this.headers = h
+                    }
+                )
+                return
             } catch (e: Throwable) {
                 ClipboardLogger.logAndCopy("Master Error $label", e.message.orEmpty())
             }
@@ -293,7 +291,7 @@ class MovieuniverseProvider : MainAPI() {
             newExtractorLink(name, label, url, if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
                 this.referer = "$origin/"
                 this.quality = Qualities.Unknown.value
-                this.headers = best
+                this.headers = h
             }
         )
     }
@@ -376,21 +374,7 @@ class MovieuniverseProvider : MainAPI() {
                                 ClipboardLogger.logAndCopy("Play $sname fresh=$fresh", "code=${r.code}\n${r.text.take(500)}")
                                 return r.text
                             }
-                            var body = mint(false)
-                            // Chẩn đoán: thử tải thẳng link stream đầu tiên (link này có thể dùng 1 lần nên sẽ mint link mới để phát)
-                            try {
-                                val du = JSONObject(body).optString("url").replace("\\/", "/")
-                                if (du.isNotBlank()) {
-                                    val dr = app.get(absUrl(embed, du), headers = mapOf("User-Agent" to ua, "Referer" to "$eOrigin/", "Origin" to eOrigin), cookies = ck, timeout = 30)
-                                    ClipboardLogger.logAndCopy(
-                                        "Probe $sname",
-                                        "code=${dr.code} final=${dr.url}\nct=${dr.headers["content-type"]} loc=${dr.headers["location"]}\ncookies=${dr.cookies.keys}\n${dr.text.take(700)}"
-                                    )
-                                    body = mint(true)
-                                }
-                            } catch (e: Throwable) {
-                                ClipboardLogger.logAndCopy("Probe Error $sname", e.message.orEmpty())
-                            }
+                            val body = mint(false)
                             val j = try { JSONObject(body) } catch (_: Throwable) { null }
                             val urls = ArrayList<Pair<String, String>>()
                             if (j != null) collect(j, "", urls) else if (body.trim().startsWith("http")) urls.add("" to body.trim())
