@@ -13,3 +13,7 @@ cloudstream {
 android {
     namespace = "com.movieuniverse"
 }
+dependencies {
+    // ... các dependency khác ...
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+}
