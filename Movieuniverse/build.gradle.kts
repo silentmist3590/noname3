@@ -1,5 +1,5 @@
 // use an integer for version numbers
-version = 1
+version = 2
 
 cloudstream {
     description = "Movieuniverse - movieuniverse.skin (phim lẻ & TV, nhiều server, phụ đề)"
