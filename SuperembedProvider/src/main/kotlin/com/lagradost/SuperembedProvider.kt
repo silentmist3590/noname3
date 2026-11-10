@@ -28,8 +28,8 @@ import java.net.URLEncoder
 // =====================================================================================
 // 1. CẤU HÌNH
 // =====================================================================================
-// ⭐ QUAY LẠI DOMAIN GỐC (Không bị nhà mạng chặn)
-private const val BASE_URL = "https://www.superembed.stream"
+// ⭐ Đổi về domain multiembed.mov theo đúng tài liệu
+private const val BASE_URL = "https://multiembed.mov"
 private const val TMDB_BASE_URL = "https://tmdb-proxy.silentmist3590.workers.dev/3"
 private const val TMDB_API_KEY = "c3d997893bf55c01f39f821b53781547"
 private const val IMG_PROXY = "https://wsrv.nl/?url="
@@ -45,12 +45,14 @@ private fun parseRef(s: String): Ref? {
 
 private data class SniffResult(val url: String, val headers: Map<String, String>)
 
+// Danh sách đen các domain quảng cáo (đã cập nhật từ log của bạn)
 private val AD_DOMAINS = listOf(
     "doubleclick.net", "googlesyndication.com", "googleadservices.com",
     "popads.net", "onclickads.net", "propellerads.com", "popcash.net",
     "adsterra.com", "adcash.com", "rapidadexchange.com", "youradexchange.com",
     "adexchangerapid.com", "googletagmanager.com", "googletagservices.com",
-    "crwdcntrl.net", "tynt.com", "mrktmtrcs.net", "dtscout.com", "onaudience.com"
+    "crwdcntrl.net", "tynt.com", "mrktmtrcs.net", "dtscout.com", "onaudience.com",
+    "histats.com", "luugy.com", "llvpn.com", "rtmark.net", "dvzcfqpdoaxtr.website"
 )
 
 // =====================================================================================
@@ -59,7 +61,7 @@ private val AD_DOMAINS = listOf(
 object ApiServices {
     suspend fun getTmdbDetails(type: String, tmdbId: Int): JSONObject? {
         return try {
-            val url = "$TMDB_BASE_URL/$type/$tmdbId?api_key=$TMDB_API_KEY"
+            val url = "$TMDB_BASE_URL/$type/$tmdbId?api_key=$TMDB_API_KEY&append_to_response=external_ids"
             JSONObject(app.get(url).text)
         } catch (e: Exception) {
             ClipboardLogger.logAndCopy("TMDB Error", e.message ?: "Unknown")
@@ -98,7 +100,7 @@ object ApiServices {
 // =====================================================================================
 class SuperembedProvider : MainAPI() {
     override var mainUrl = BASE_URL
-    override var name = "SuperEmbed"
+    override var name = "MultiEmbed"
     override var lang = "en"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
@@ -182,7 +184,10 @@ class SuperembedProvider : MainAPI() {
         val posterUrl = poster(json.optString("poster_path"))
         val year = json.optString("release_date", json.optString("first_air_date")).take(4).toIntOrNull()
 
-        val imdbId = json.optString("imdb_id")
+        var imdbId = json.optString("imdb_id")
+        if (imdbId.isEmpty()) {
+            imdbId = json.optJSONObject("external_ids")?.optString("imdb_id") ?: ""
+        }
         if (imdbId.isNotEmpty()) imdbCache[tmdbId] = imdbId
 
         val canonical = "superembed:$mediaType:$tmdbId"
@@ -221,7 +226,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // WEBVIEW SNIFFER (Tối ưu cho Cloudflare)
+    // WEBVIEW SNIFFER
     // =====================================================================================
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun sniffStream(pageUrl: String, referer: String, ua: String, seen: MutableList<String>): SniffResult? {
@@ -271,7 +276,6 @@ class SuperembedProvider : MainAPI() {
                         override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: android.os.Message?): Boolean = false
                     }
 
-                    // ⭐ SCRIPT VƯỢT CLOUDFLARE
                     val antiBotJs = """
                         (function() {
                             Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
@@ -282,11 +286,31 @@ class SuperembedProvider : MainAPI() {
                     """.trimIndent()
 
                     val fakePopup = "try{window.open=function(){return {closed:false,focus:function(){},close:function(){},blur:function(){}}};}catch(e){}"
-                    val clickJs = "(function(){function fire(el){if(!el)return;try{el.click();}catch(e){}}" +
-                        "fire(document.getElementById('bigPlay'));" +
-                        "fire(document.querySelector('.jw-icon-display,.jw-display-icon-container,.jw-bigplay,[aria-label=Play],.vjs-big-play-button,.play-btn'));" +
-                        "fire(document.querySelector('[class*=skip],[aria-label*=Skip],[aria-label*=skip]'));" +
-                        "var v=document.querySelector('video');if(v){v.muted=true;var p=v.play();if(p&&p.catch)p.catch(function(){});}})();"
+                    val clickJs = """
+                        (function() {
+                            function fire(sel) {
+                                var els = document.querySelectorAll(sel);
+                                for (var i = 0; i < els.length; i++) {
+                                    try { els[i].click(); } catch(e) {}
+                                }
+                            }
+                            fire('#bigPlay');
+                            fire('.jw-display-icon-container, .jw-icon-display, .jw-bigplay');
+                            fire('media-player, media-play-button, [data-media-button], .vds-play-button, button[aria-label="Play"]');
+                            
+                            var overlays = document.querySelectorAll('div[style*="z-index: 999999"], div[style*="z-index: 2147483647"]');
+                            for (var i = 0; i < overlays.length; i++) {
+                                try { overlays[i].remove(); } catch(e) {}
+                            }
+
+                            var v = document.querySelector('video');
+                            if (v) {
+                                v.muted = true;
+                                var p = v.play();
+                                if (p && p.catch) p.catch(function(){});
+                            }
+                        })();
+                    """.trimIndent()
 
                     var taps = 0
                     fun tap() {
@@ -301,7 +325,7 @@ class SuperembedProvider : MainAPI() {
                             wv.dispatchTouchEvent(u)
                             d.recycle(); u.recycle()
                         } catch (_: Exception) {}
-                        if (taps < 60) handler.postDelayed({ tap() }, 1500) 
+                        if (taps < 80) handler.postDelayed({ tap() }, 1500) 
                     }
 
                     wv.webViewClient = object : WebViewClient() {
@@ -312,7 +336,6 @@ class SuperembedProvider : MainAPI() {
                         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                             val u = request?.url?.toString() ?: return null
 
-                            // Chỉ chặn quảng cáo, cho phép mọi redirect (tránh chặn nhầm domain của Cloudflare hoặc Player)
                             if (AD_DOMAINS.any { u.contains(it, ignoreCase = true) }) {
                                 seen.add("BLOCKED AD: " + u.take(100))
                                 return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream("".toByteArray()))
@@ -333,7 +356,6 @@ class SuperembedProvider : MainAPI() {
 
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                             val u = request?.url?.toString() ?: return false
-                            // Cho phép Cloudflare và các domain player tự do chuyển hướng
                             return AD_DOMAINS.any { u.contains(it, ignoreCase = true) }
                         }
 
@@ -386,24 +408,34 @@ class SuperembedProvider : MainAPI() {
             return false
         }
 
-        // ⭐ SỬ DỤNG MOBILE USER-AGENT
         val ua = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        val fakeReferer = "https://multiembed.mov/"
 
+        // ⭐ ÁP DỤNG ĐÚNG CHUẨN TỪ ẢNH TÀI LIỆU CỦA BẠN
+        val imdbId = imdbCache[tmdbId] ?: ""
+        
         val embedUrl = if (type == "movie") {
-            "$BASE_URL/?c=embed&video_id=$tmdbId&tmdb=1"
+            if (imdbId.isNotEmpty()) {
+                "$BASE_URL/?video_id=$imdbId"
+            } else {
+                "$BASE_URL/?video_id=$tmdbId&tmdb=1"
+            }
         } else {
-            "$BASE_URL/?c=embed&video_id=$tmdbId&tmdb=1&s=$season&e=$episode"
+            if (imdbId.isNotEmpty()) {
+                "$BASE_URL/?video_id=$imdbId&s=$season&e=$episode"
+            } else {
+                "$BASE_URL/?video_id=$tmdbId&tmdb=1&s=$season&e=$episode"
+            }
         }
 
         try {
-            val imdbId = imdbCache[tmdbId] ?: ""
             if (imdbId.isNotEmpty()) {
                 ApiServices.fetchSubtitles(imdbId, subtitleCallback)
             }
 
             ClipboardLogger.logAndCopy("Embed URL", embedUrl)
             val seen = mutableListOf<String>()
-            val result = sniffStream(embedUrl, "$BASE_URL/", ua, seen)
+            val result = sniffStream(embedUrl, fakeReferer, ua, seen)
 
             ClipboardLogger.logAndCopy(
                 "Requests Seen (${seen.size})",
@@ -418,18 +450,18 @@ class SuperembedProvider : MainAPI() {
 
             val requiredHeaders = mapOf(
                 "User-Agent" to ua,
-                "Referer" to "$BASE_URL/",
+                "Referer" to fakeReferer,
                 "Origin" to BASE_URL
             )
 
             callback.invoke(
                 newExtractorLink(
                     source = this.name,
-                    name = "SuperEmbed",
+                    name = "MultiEmbed",
                     url = result.url,
                     type = ExtractorLinkType.M3U8
                 ) {
-                    this.referer = "$BASE_URL/"
+                    this.referer = fakeReferer
                     this.quality = Qualities.P1080.value
                     this.headers = requiredHeaders
                 }
