@@ -230,12 +230,57 @@ class MovieuniverseProvider : MainAPI() {
 
     private suspend fun emitStream(url: String, label: String, embed: String, callback: (ExtractorLink) -> Unit) {
         val origin = Regex("^https?://[^/]+").find(embed)?.value ?: mainUrl
-        val isM3u8 = url.contains(".m3u8", true) || url.contains("/hls", true) || url.contains("playlist", true)
+        val isM3u8 = url.contains(".m3u8", true) || url.contains("/hls", true) || url.contains("playlist", true) || url.contains("_stream")
+        val hFull = mapOf("User-Agent" to ua, "Origin" to origin, "Referer" to "$origin/")
+        if (isM3u8) {
+            try {
+                val mr = app.get(url, headers = hFull, timeout = 30)
+                val master = mr.text
+                if (master.contains("#EXT-X-STREAM-INF")) {
+                    val base = mr.url
+                    val lines = master.lines()
+                    var emitted = 0
+                    for (i in lines.indices) {
+                        if (!lines[i].startsWith("#EXT-X-STREAM-INF")) continue
+                        val uri = lines.drop(i + 1).firstOrNull { it.isNotBlank() && !it.startsWith("#") }?.trim() ?: continue
+                        val height = Regex("RESOLUTION=\\d+x(\\d+)").find(lines[i])?.groupValues?.get(1)?.toIntOrNull()
+                        val vu = absUrl(base, uri)
+                        val cands = listOf(
+                            mapOf("User-Agent" to ua),
+                            mapOf("User-Agent" to ua, "Referer" to "$origin/"),
+                            hFull
+                        )
+                        for (h in cands) {
+                            try {
+                                val vr = app.get(vu, headers = h, timeout = 30)
+                                ClipboardLogger.logAndCopy("Variant $label", "h=${h.keys} code=${vr.code} final=${vr.url}\n${vr.text.take(300)}")
+                                if (vr.code in 200..299 && vr.text.contains("#EXTM3U")) {
+                                    callback(
+                                        newExtractorLink(name, "$label ${height?.let { "${it}p" } ?: ""}".trim(), vr.url, ExtractorLinkType.M3U8) {
+                                            this.referer = h["Referer"] ?: ""
+                                            this.quality = height ?: Qualities.Unknown.value
+                                            this.headers = h
+                                        }
+                                    )
+                                    emitted++
+                                    break
+                                }
+                            } catch (e: Throwable) {
+                                ClipboardLogger.logAndCopy("Variant Error $label", e.message.orEmpty())
+                            }
+                        }
+                    }
+                    if (emitted > 0) return
+                }
+            } catch (e: Throwable) {
+                ClipboardLogger.logAndCopy("Master Error $label", e.message.orEmpty())
+            }
+        }
         callback(
             newExtractorLink(name, label, url, if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
                 this.referer = "$origin/"
                 this.quality = Qualities.Unknown.value
-                this.headers = mapOf("User-Agent" to ua, "Origin" to origin, "Referer" to "$origin/")
+                this.headers = hFull
             }
         )
     }
