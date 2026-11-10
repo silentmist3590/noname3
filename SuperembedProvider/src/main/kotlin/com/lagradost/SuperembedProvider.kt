@@ -28,7 +28,6 @@ import java.net.URLEncoder
 // =====================================================================================
 // 1. CẤU HÌNH
 // =====================================================================================
-// ⭐ Đổi về domain multiembed.mov theo đúng tài liệu
 private const val BASE_URL = "https://multiembed.mov"
 private const val TMDB_BASE_URL = "https://tmdb-proxy.silentmist3590.workers.dev/3"
 private const val TMDB_API_KEY = "c3d997893bf55c01f39f821b53781547"
@@ -45,14 +44,15 @@ private fun parseRef(s: String): Ref? {
 
 private data class SniffResult(val url: String, val headers: Map<String, String>)
 
-// Danh sách đen các domain quảng cáo (đã cập nhật từ log của bạn)
+// Danh sách đen các domain quảng cáo
 private val AD_DOMAINS = listOf(
     "doubleclick.net", "googlesyndication.com", "googleadservices.com",
     "popads.net", "onclickads.net", "propellerads.com", "popcash.net",
     "adsterra.com", "adcash.com", "rapidadexchange.com", "youradexchange.com",
     "adexchangerapid.com", "googletagmanager.com", "googletagservices.com",
     "crwdcntrl.net", "tynt.com", "mrktmtrcs.net", "dtscout.com", "onaudience.com",
-    "histats.com", "luugy.com", "llvpn.com", "rtmark.net", "dvzcfqpdoaxtr.website"
+    "histats.com", "luugy.com", "llvpn.com", "rtmark.net", "dvzcfqpdoaxtr.website",
+    "adsco.re", "ntwkbc21.com", "ntwkbc42.com", "usrpubtrck.com", "cdn4ads.com"
 )
 
 // =====================================================================================
@@ -411,7 +411,6 @@ class SuperembedProvider : MainAPI() {
         val ua = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
         val fakeReferer = "https://multiembed.mov/"
 
-        // ⭐ ÁP DỤNG ĐÚNG CHUẨN TỪ ẢNH TÀI LIỆU CỦA BẠN
         val imdbId = imdbCache[tmdbId] ?: ""
         
         val embedUrl = if (type == "movie") {
@@ -448,11 +447,13 @@ class SuperembedProvider : MainAPI() {
                 return false
             }
 
-            val requiredHeaders = mapOf(
-                "User-Agent" to ua,
-                "Referer" to fakeReferer,
-                "Origin" to BASE_URL
-            )
+            // ⭐ SỬA LỖI TẠI ĐÂY: Dùng Referer của player streamingnow.mov
+            val playerReferer = "https://streamingnow.mov/"
+            val finalHeaders = result.headers.toMutableMap().apply {
+                put("User-Agent", ua)
+                put("Referer", playerReferer)
+                put("Origin", "https://streamingnow.mov")
+            }
 
             callback.invoke(
                 newExtractorLink(
@@ -461,9 +462,9 @@ class SuperembedProvider : MainAPI() {
                     url = result.url,
                     type = ExtractorLinkType.M3U8
                 ) {
-                    this.referer = fakeReferer
+                    this.referer = playerReferer
                     this.quality = Qualities.P1080.value
-                    this.headers = requiredHeaders
+                    this.headers = finalHeaders
                 }
             )
             return true
