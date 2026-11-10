@@ -242,6 +242,7 @@ class MovieuniverseProvider : MainAPI() {
     }
 
     private var diagDone = false
+    @Volatile private var proxyOk = false
 
     /** Chẩn đoán lỗi 2004: dùng link mới riêng, kiểm tra dùng-một-lần, Range, và nội dung playlist. */
     private suspend fun diag(masterUrl: String, origin: String) {
@@ -279,6 +280,7 @@ class MovieuniverseProvider : MainAPI() {
         val isM3u8 = url.contains(".m3u8", true) || url.contains("/hls", true) || url.contains("playlist", true) || url.contains("_stream") || url.contains("cap.php")
         // Phân đoạn video cần Referer (một số nguồn), không gửi Origin
         val h = mapOf("User-Agent" to ua, "Referer" to "$origin/")
+        fun px(u: String) = if (proxyOk) LocalProxy.wrap(u) else u
         if (isM3u8 && !diagDone && url.contains("_stream") && remint != null) {
             diagDone = true
             remint.invoke()?.let { diag(it, origin) }
@@ -300,10 +302,10 @@ class MovieuniverseProvider : MainAPI() {
                         val uri = lines.drop(i + 1).firstOrNull { it.isNotBlank() && !it.startsWith("#") }?.trim() ?: continue
                         val height = Regex("RESOLUTION=\\d+x(\\d+)").find(lines[i])?.groupValues?.get(1)?.toIntOrNull()
                         callback(
-                            newExtractorLink(name, "$label ${height?.let { "${it}p" } ?: ""}".trim(), absUrl(mr.url, uri), ExtractorLinkType.M3U8) {
-                                this.referer = "$origin/"
+                            newExtractorLink(name, "$label ${height?.let { "${it}p" } ?: ""}".trim(), px(absUrl(mr.url, uri)), ExtractorLinkType.M3U8) {
+                                this.referer = if (proxyOk) "" else "$origin/"
                                 this.quality = height ?: Qualities.Unknown.value
-                                this.headers = h
+                                this.headers = if (proxyOk) emptyMap() else h
                             }
                         )
                         n++
@@ -313,10 +315,10 @@ class MovieuniverseProvider : MainAPI() {
                 // Có nhiều track âm thanh: đưa nguyên playlist chính (link mới, chưa bị tải) cho trình phát
                 val u2 = remint?.invoke() ?: url
                 callback(
-                    newExtractorLink(name, label, u2, ExtractorLinkType.M3U8) {
-                        this.referer = "$origin/"
+                    newExtractorLink(name, label, px(u2), ExtractorLinkType.M3U8) {
+                        this.referer = if (proxyOk) "" else "$origin/"
                         this.quality = Qualities.Unknown.value
-                        this.headers = h
+                        this.headers = if (proxyOk) emptyMap() else h
                     }
                 )
                 return
@@ -360,6 +362,12 @@ class MovieuniverseProvider : MainAPI() {
                 ClipboardLogger.logAndCopy("Embed", "code=${emb.code} Q=${q != null} cookies=${emb.cookies.keys}\n" + (if (q == null) ehtml.take(600) else ""))
                 if (q != null) {
                     val eOrigin = Regex("^https?://[^/]+").find(embed)!!.value
+                    LocalProxy.ua = ua
+                    LocalProxy.referer = "$eOrigin/"
+                    proxyOk = try {
+                        app.get("http://127.0.0.1:${LocalProxy.port()}/ping", timeout = 5).text.trim() == "ok"
+                    } catch (_: Throwable) { false }
+                    ClipboardLogger.logAndCopy("Proxy", "ok=$proxyOk")
                     val t = q.optString("t")
                     val qs = "type=${q.optString("type")}&id=${URLEncoder.encode(q.optString("id"), "UTF-8")}&s=${q.optInt("s")}&e=${q.optInt("e")}&t=${URLEncoder.encode(t, "UTF-8")}"
                     val eh = mapOf("User-Agent" to ua, "Referer" to embed, "Accept" to "application/json, */*")
