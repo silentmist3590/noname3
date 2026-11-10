@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.M3u8Helper // ⭐ Thêm import M3u8Helper
 import com.lagradost.cloudstream3.utils.Qualities
 import android.annotation.SuppressLint
 import android.content.Context
@@ -13,6 +14,7 @@ import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.CookieManager // ⭐ Thêm import CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -44,7 +46,6 @@ private fun parseRef(s: String): Ref? {
 
 private data class SniffResult(val url: String, val headers: Map<String, String>)
 
-// Danh sách đen các domain quảng cáo
 private val AD_DOMAINS = listOf(
     "doubleclick.net", "googlesyndication.com", "googleadservices.com",
     "popads.net", "onclickads.net", "propellerads.com", "popcash.net",
@@ -52,7 +53,8 @@ private val AD_DOMAINS = listOf(
     "adexchangerapid.com", "googletagmanager.com", "googletagservices.com",
     "crwdcntrl.net", "tynt.com", "mrktmtrcs.net", "dtscout.com", "onaudience.com",
     "histats.com", "luugy.com", "llvpn.com", "rtmark.net", "dvzcfqpdoaxtr.website",
-    "adsco.re", "ntwkbc21.com", "ntwkbc42.com", "usrpubtrck.com", "cdn4ads.com"
+    "adsco.re", "ntwkbc21.com", "ntwkbc42.com", "usrpubtrck.com", "cdn4ads.com",
+    "ddyejopzyjxxzf.com" // ⭐ Thêm từ log của bạn
 )
 
 // =====================================================================================
@@ -386,7 +388,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // LOAD LINKS
+    // LOAD LINKS (Xử lý IP-lock và Cookie)
     // =====================================================================================
     override suspend fun loadLinks(
         data: String,
@@ -436,38 +438,62 @@ class SuperembedProvider : MainAPI() {
             val seen = mutableListOf<String>()
             val result = sniffStream(embedUrl, fakeReferer, ua, seen)
 
-            ClipboardLogger.logAndCopy(
-                "Requests Seen (${seen.size})",
-                seen.takeLast(15).joinToString("\n")
-            )
-            ClipboardLogger.logAndCopy("Result URL", if (result == null) "null" else result.url)
-
             if (result == null) {
                 ClipboardLogger.logAndCopy("Error", "WebView không bắt được link stream.")
                 return false
             }
 
-            // ⭐ SỬA LỖI TẠI ĐÂY: Dùng Referer của player streamingnow.mov
+            val m3u8Url = result.url
             val playerReferer = "https://streamingnow.mov/"
-            val finalHeaders = result.headers.toMutableMap().apply {
-                put("User-Agent", ua)
-                put("Referer", playerReferer)
-                put("Origin", "https://streamingnow.mov")
+
+            // ⭐ LẤY COOKIE TỪ WEBVIEW
+            val cookie = CookieManager.getInstance().getCookie(m3u8Url) ?: ""
+            
+            val finalHeaders = mutableMapOf(
+                "User-Agent" to ua,
+                "Referer" to playerReferer,
+                "Origin" to "https://streamingnow.mov"
+            )
+            if (cookie.isNotEmpty()) {
+                finalHeaders["Cookie"] = cookie
+                ClipboardLogger.logAndCopy("Cookie", "Đã lấy được Cookie: ${cookie.take(50)}...")
+            }
+            
+            // Gộp thêm các header khác từ request gốc của WebView
+            result.headers.forEach { (k, v) ->
+                if (!finalHeaders.containsKey(k)) finalHeaders[k] = v
             }
 
-            callback.invoke(
-                newExtractorLink(
-                    source = this.name,
-                    name = "MultiEmbed",
-                    url = result.url,
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    this.referer = playerReferer
-                    this.quality = Qualities.P1080.value
-                    this.headers = finalHeaders
-                }
+            // ⭐ DÙNG M3U8HELPER ĐỂ KIỂM TRA VÀ TÁCH CHẤT LƯỢNG
+            val qualities = M3u8Helper.generateM3u8(
+                source = this.name,
+                streamUrl = m3u8Url,
+                referer = playerReferer,
+                headers = finalHeaders
             )
-            return true
+
+            if (qualities.isNotEmpty()) {
+                ClipboardLogger.logAndCopy("Success", "M3u8Helper đã tách được ${qualities.size} chất lượng.")
+                qualities.forEach { callback.invoke(it) }
+                return true
+            } else {
+                // Nếu M3u8Helper thất bại (thường do 403), ta vẫn cố phát link thô như một fallback
+                ClipboardLogger.logAndCopy("M3u8Helper Failed", "Không thể tải playlist, có thể do sai header hoặc link hết hạn. Thử phát link thô.")
+                callback.invoke(
+                    newExtractorLink(
+                        source = this.name,
+                        name = "MultiEmbed",
+                        url = m3u8Url,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = playerReferer
+                        this.quality = Qualities.P1080.value
+                        this.headers = finalHeaders
+                    }
+                )
+                return true
+            }
+
         } catch (e: Exception) {
             if (e is java.util.concurrent.CancellationException) throw e
             ClipboardLogger.logAndCopy("Exception", "Error: ${e.message}\nStackTrace: ${e.stackTraceToString().take(1500)}")
