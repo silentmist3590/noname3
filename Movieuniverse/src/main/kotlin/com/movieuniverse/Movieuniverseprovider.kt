@@ -310,16 +310,28 @@ class MovieuniverseProvider : MainAPI() {
                         val lg = s.optString("lang").takeIf { it.isNotBlank() && it != "null" }
                         val label = if (lg != null) "$sname [$lg]" else sname
                         try {
-                            var body = ""
-                            for (attempt in 0..1) {
+                            suspend fun mint(fresh: Boolean): String {
                                 val r = app.get(
-                                    "$eOrigin/api.php?a=play&ref=" + URLEncoder.encode(ref, "UTF-8") + "&t=" + URLEncoder.encode(t, "UTF-8") + (if (attempt > 0) "&fresh=1" else ""),
+                                    "$eOrigin/api.php?a=play&ref=" + URLEncoder.encode(ref, "UTF-8") + "&t=" + URLEncoder.encode(t, "UTF-8") + (if (fresh) "&fresh=1" else ""),
                                     headers = eh, cookies = ck, timeout = 30
                                 )
-                                body = r.text
-                                ClipboardLogger.logAndCopy("Play $sname#$attempt", "code=${r.code}\n${body.take(700)}")
-                                if (r.code in 200..299 && body.contains("http")) break
-                                kotlinx.coroutines.delay(1200)
+                                ClipboardLogger.logAndCopy("Play $sname fresh=$fresh", "code=${r.code}\n${r.text.take(500)}")
+                                return r.text
+                            }
+                            var body = mint(false)
+                            // Chẩn đoán: thử tải thẳng link stream đầu tiên (link này có thể dùng 1 lần nên sẽ mint link mới để phát)
+                            try {
+                                val du = JSONObject(body).optString("url").replace("\\/", "/")
+                                if (du.isNotBlank()) {
+                                    val dr = app.get(absUrl(embed, du), headers = mapOf("User-Agent" to ua, "Referer" to "$eOrigin/", "Origin" to eOrigin), cookies = ck, timeout = 30)
+                                    ClipboardLogger.logAndCopy(
+                                        "Probe $sname",
+                                        "code=${dr.code} final=${dr.url}\nct=${dr.headers["content-type"]} loc=${dr.headers["location"]}\ncookies=${dr.cookies.keys}\n${dr.text.take(700)}"
+                                    )
+                                    body = mint(true)
+                                }
+                            } catch (e: Throwable) {
+                                ClipboardLogger.logAndCopy("Probe Error $sname", e.message.orEmpty())
                             }
                             val j = try { JSONObject(body) } catch (_: Throwable) { null }
                             val urls = ArrayList<Pair<String, String>>()
