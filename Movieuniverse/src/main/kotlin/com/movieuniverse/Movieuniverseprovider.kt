@@ -331,17 +331,17 @@ class MovieuniverseProvider : MainAPI() {
                     // danh sách server
                     var servers: JSONArray? = q.optJSONObject("ssr")?.optJSONArray("servers")
                     var tries = 0
-                    while ((servers == null || servers.length() == 0) && tries < 5) {
+                    while ((servers == null || servers.length() == 0) && tries < 24) {
                         tries++
                         try {
                             val r = app.get("$eOrigin/api.php?a=sources&$qs", headers = eh, cookies = ck, timeout = 30)
-                            ClipboardLogger.logAndCopy("Sources#$tries", "code=${r.code}\n${r.text.take(500)}")
+                            if (tries <= 2 || tries % 6 == 0 || r.text.contains("\"ok\"")) ClipboardLogger.logAndCopy("Sources#$tries", "code=${r.code}\n${r.text.take(500)}")
                             val j = JSONObject(r.text)
                             servers = j.optJSONArray("servers")
                         } catch (e: Throwable) {
                             ClipboardLogger.logAndCopy("Sources Error", e.message.orEmpty())
                         }
-                        if (servers == null || servers.length() == 0) kotlinx.coroutines.delay(2500)
+                        if (servers == null || servers.length() == 0) kotlinx.coroutines.delay(3000)
                     }
                     ClipboardLogger.logAndCopy("Servers", "count=${servers?.length() ?: 0}")
                     // phụ đề
