@@ -107,7 +107,7 @@ object ApiServices {
 // 3. LỚP PROVIDER CHÍNH
 // =====================================================================================
 class SuperembedProvider : MainAPI() {
-    override var mainUrl = BASE_URL
+    override var mainUrl = ""
     override var name = "SuperEmbed"
     override var lang = "en"
     override val hasMainPage = true
