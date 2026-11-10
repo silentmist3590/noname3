@@ -28,7 +28,8 @@ import java.net.URLEncoder
 // =====================================================================================
 // 1. CẤU HÌNH
 // =====================================================================================
-private const val BASE_URL = "https://www.superembed.stream"
+// ⭐ SỬ DỤNG DOMAIN THAY THẾ multiembed.mov
+private const val BASE_URL = "https://multiembed.mov"
 private const val TMDB_BASE_URL = "https://tmdb-proxy.silentmist3590.workers.dev/3"
 private const val TMDB_API_KEY = "c3d997893bf55c01f39f821b53781547"
 private const val IMG_PROXY = "https://wsrv.nl/?url="
@@ -44,12 +45,13 @@ private fun parseRef(s: String): Ref? {
 
 private data class SniffResult(val url: String, val headers: Map<String, String>)
 
-// Danh sách domain quảng cáo cần chặn
+// ⭐ MỞ RỘNG DANH SÁCH DOMAIN QUẢNG CÁO CẦN CHẶN (dựa trên log của bạn)
 private val AD_DOMAINS = listOf(
     "doubleclick.net", "googlesyndication.com", "googleadservices.com",
     "popads.net", "onclickads.net", "propellerads.com", "popcash.net",
     "adsterra.com", "adcash.com", "rapidadexchange.com", "youradexchange.com",
-    "adexchangerapid.com", "googletagmanager.com", "googletagservices.com"
+    "adexchangerapid.com", "googletagmanager.com", "googletagservices.com",
+    "crwdcntrl.net", "tynt.com", "mrktmtrcs.net", "dtscout.com", "onaudience.com"
 )
 
 // =====================================================================================
@@ -66,36 +68,25 @@ object ApiServices {
         }
     }
 
-    // Tự động lấy phụ đề từ OpenSubtitles (tùy chọn)
     suspend fun fetchSubtitles(imdbId: String, subtitleCallback: (SubtitleFile) -> Unit) {
         if (imdbId.isEmpty()) return
         try {
             val cleanId = imdbId.removePrefix("tt").trimStart('0').ifEmpty { imdbId }
-            val headers = mapOf(
-                "User-Agent" to "trailers.to-UA",
-                "X-User-Agent" to "trailers.to-UA"
-            )
+            val headers = mapOf("User-Agent" to "trailers.to-UA", "X-User-Agent" to "trailers.to-UA")
             val languages = listOf("vie", "eng")
-
             for (lang in languages) {
                 try {
                     val url = "https://rest.opensubtitles.org/search/imdbid-$cleanId/sublanguageid-$lang"
                     val res = app.get(url, headers = headers).text
                     if (!res.trim().startsWith("[")) continue
-
                     val arr = org.json.JSONArray(res)
                     for (i in 0 until minOf(arr.length(), 5)) {
                         val item = arr.getJSONObject(i)
                         val subUrl = item.optString("SubDownloadLink")
                         val subLang = item.optString("SubLanguageID", lang)
-                        val name = item.optString("MovieReleaseName", "Unknown")
-                        if (subUrl.isNotEmpty()) {
-                            subtitleCallback.invoke(SubtitleFile("$subLang - ${name.take(40)}", subUrl))
-                        }
+                        if (subUrl.isNotEmpty()) subtitleCallback.invoke(SubtitleFile(subLang, subUrl))
                     }
-                } catch (e: Exception) {
-                    // Bỏ qua lỗi từng ngôn ngữ
-                }
+                } catch (_: Exception) {}
             }
         } catch (e: Exception) {
             ClipboardLogger.logAndCopy("Subtitles Error", e.message ?: "")
@@ -107,7 +98,7 @@ object ApiServices {
 // 3. LỚP PROVIDER CHÍNH
 // =====================================================================================
 class SuperembedProvider : MainAPI() {
-    override var mainUrl = ""
+    override var mainUrl = BASE_URL
     override var name = "SuperEmbed"
     override var lang = "en"
     override val hasMainPage = true
@@ -239,7 +230,6 @@ class SuperembedProvider : MainAPI() {
         return suspendCoroutine { cont ->
             val handler = Handler(Looper.getMainLooper())
             handler.post {
-                // Chỉ sử dụng CommonActivity.activity
                 val ctx: Context? = CommonActivity.activity
                 if (ctx == null) {
                     ClipboardLogger.logAndCopy("Sniff Error", "Không có Context")
@@ -348,6 +338,7 @@ class SuperembedProvider : MainAPI() {
                         CommonActivity.activity?.addContentView(wv, ViewGroup.LayoutParams(w, h))
                     } catch (_: Exception) {}
 
+                    // ⭐ TĂNG THỜI GIAN CHỜ để trình phát có thời gian khởi động
                     handler.postDelayed({ finish(null) }, 180_000L)
                     wv.loadUrl(pageUrl, mapOf("Referer" to referer))
                 } catch (e: Exception) {
@@ -368,12 +359,9 @@ class SuperembedProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         ClipboardLogger.reset()
-        ClipboardLogger.logAndCopy("LoadLinks Start", "Data: $data")
+        ClipboardLogger.logAndCopy("LoadLinks", "Data: $data")
 
-        val ref = parseRef(data) ?: run {
-        ClipboardLogger.logAndCopy("Error", "Không parse được ID từ: $data")
-        return false
-        }
+        val ref = parseRef(data) ?: return false
         val type = ref.type
         val tmdbId = ref.id
         val season = ref.season
@@ -386,15 +374,14 @@ class SuperembedProvider : MainAPI() {
 
         val ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
 
-        // Tạo URL nhúng SuperEmbed
+        // ⭐ TẠO URL NHÚNG MỚI VỚI multiembed.mov VÀ THÊM autoPlay
         val embedUrl = if (type == "movie") {
-            "$BASE_URL/?c=embed&video_id=$tmdbId&tmdb=1"
+            "$BASE_URL/?video_id=$tmdbId&tmdb=1&autoPlay=true"
         } else {
-            "$BASE_URL/?c=embed&video_id=$tmdbId&tmdb=1&s=$season&e=$episode"
+            "$BASE_URL/?video_id=$tmdbId&tmdb=1&s=$season&e=$episode&autoPlay=true"
         }
 
         try {
-            // Lấy phụ đề (tùy chọn)
             val imdbId = imdbCache[tmdbId] ?: ""
             if (imdbId.isNotEmpty()) {
                 ApiServices.fetchSubtitles(imdbId, subtitleCallback)
@@ -404,11 +391,13 @@ class SuperembedProvider : MainAPI() {
             val seen = mutableListOf<String>()
             val result = sniffStream(embedUrl, "$BASE_URL/", ua, seen)
 
+            // ⭐ GHI LOG CHI TIẾT CÁC REQUEST ĐỂ DEBUG
             ClipboardLogger.logAndCopy(
-                "Requests Seen (${seen.size})", 
-                seen.takeLast(15).joinToString("\n") // In 15 request cuối
+                "Requests Seen (${seen.size})",
+                seen.takeLast(15).joinToString("\n")
             )
             ClipboardLogger.logAndCopy("Result URL", if (result == null) "null" else result.url)
+
             if (result == null) {
                 ClipboardLogger.logAndCopy("Error", "WebView không bắt được link stream.")
                 return false
