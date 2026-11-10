@@ -28,7 +28,6 @@ import java.net.URLEncoder
 // =====================================================================================
 // 1. CẤU HÌNH
 // =====================================================================================
-// ⭐ SỬ DỤNG DOMAIN THAY THẾ multiembed.mov
 private const val BASE_URL = "https://multiembed.mov"
 private const val TMDB_BASE_URL = "https://tmdb-proxy.silentmist3590.workers.dev/3"
 private const val TMDB_API_KEY = "c3d997893bf55c01f39f821b53781547"
@@ -45,7 +44,6 @@ private fun parseRef(s: String): Ref? {
 
 private data class SniffResult(val url: String, val headers: Map<String, String>)
 
-// ⭐ MỞ RỘNG DANH SÁCH DOMAIN QUẢNG CÁO CẦN CHẶN (dựa trên log của bạn)
 private val AD_DOMAINS = listOf(
     "doubleclick.net", "googlesyndication.com", "googleadservices.com",
     "popads.net", "onclickads.net", "propellerads.com", "popcash.net",
@@ -140,7 +138,6 @@ class SuperembedProvider : MainAPI() {
             newHomePageResponse(request.name, home, hasNext = page < json.optInt("total_pages", 1))
         } catch (e: Exception) {
             if (e is java.util.concurrent.CancellationException) throw e
-            ClipboardLogger.logAndCopy("getMainPage Error", e.message ?: "Unknown")
             newHomePageResponse(request.name, emptyList(), hasNext = false)
         }
     }
@@ -223,7 +220,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // WEBVIEW SNIFFER
+    // WEBVIEW SNIFFER (Tối ưu cho Cloudflare Turnstile)
     // =====================================================================================
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun sniffStream(pageUrl: String, referer: String, ua: String, seen: MutableList<String>): SniffResult? {
@@ -261,6 +258,7 @@ class SuperembedProvider : MainAPI() {
                     wv.settings.apply {
                         javaScriptEnabled = true
                         domStorageEnabled = true
+                        databaseEnabled = true
                         mediaPlaybackRequiresUserGesture = false
                         javaScriptCanOpenWindowsAutomatically = true
                         setSupportMultipleWindows(true)
@@ -272,6 +270,16 @@ class SuperembedProvider : MainAPI() {
                     wv.webChromeClient = object : WebChromeClient() {
                         override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: android.os.Message?): Boolean = false
                     }
+
+                    // ⭐ Script đánh lừa Cloudflare (Xóa dấu vết bot)
+                    val antiBotJs = """
+                        (function() {
+                            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                            Object.defineProperty(navigator, 'languages', {get: () => ['vi-VN', 'vi', 'en']});
+                            Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+                            window.chrome = { runtime: {} };
+                        })();
+                    """.trimIndent()
 
                     val fakePopup = "try{window.open=function(){return {closed:false,focus:function(){},close:function(){},blur:function(){}}};}catch(e){}"
                     val clickJs = "(function(){function fire(el){if(!el)return;try{el.click();}catch(e){}}" +
@@ -293,10 +301,15 @@ class SuperembedProvider : MainAPI() {
                             wv.dispatchTouchEvent(u)
                             d.recycle(); u.recycle()
                         } catch (_: Exception) {}
-                        if (taps < 40) handler.postDelayed({ tap() }, 1500)
+                        if (taps < 60) handler.postDelayed({ tap() }, 1500) // Tăng số lần click
                     }
 
                     wv.webViewClient = object : WebViewClient() {
+                        override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                            // Chạy script chống bot ngay khi trang bắt đầu tải
+                            wv.evaluateJavascript(antiBotJs, null)
+                        }
+
                         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                             val u = request?.url?.toString() ?: return null
 
@@ -324,6 +337,7 @@ class SuperembedProvider : MainAPI() {
                         }
 
                         override fun onPageFinished(view: WebView?, url: String?) {
+                            wv.evaluateJavascript(antiBotJs, null)
                             handler.postDelayed({ tap() }, 800)
                         }
                     }
@@ -338,7 +352,6 @@ class SuperembedProvider : MainAPI() {
                         CommonActivity.activity?.addContentView(wv, ViewGroup.LayoutParams(w, h))
                     } catch (_: Exception) {}
 
-                    // ⭐ TĂNG THỜI GIAN CHỜ để trình phát có thời gian khởi động
                     handler.postDelayed({ finish(null) }, 180_000L)
                     wv.loadUrl(pageUrl, mapOf("Referer" to referer))
                 } catch (e: Exception) {
@@ -372,9 +385,9 @@ class SuperembedProvider : MainAPI() {
             return false
         }
 
-        val ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+        // ⭐ SỬ DỤNG MOBILE USER-AGENT ĐỂ QUA MẶT CLOUDFLARE
+        val ua = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
-        // ⭐ TẠO URL NHÚNG MỚI VỚI multiembed.mov VÀ THÊM autoPlay
         val embedUrl = if (type == "movie") {
             "$BASE_URL/?video_id=$tmdbId&tmdb=1&autoPlay=true"
         } else {
@@ -391,7 +404,6 @@ class SuperembedProvider : MainAPI() {
             val seen = mutableListOf<String>()
             val result = sniffStream(embedUrl, "$BASE_URL/", ua, seen)
 
-            // ⭐ GHI LOG CHI TIẾT CÁC REQUEST ĐỂ DEBUG
             ClipboardLogger.logAndCopy(
                 "Requests Seen (${seen.size})",
                 seen.takeLast(15).joinToString("\n")
