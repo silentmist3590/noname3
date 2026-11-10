@@ -368,9 +368,12 @@ class SuperembedProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         ClipboardLogger.reset()
-        ClipboardLogger.logAndCopy("LoadLinks", "Data: $data")
+        ClipboardLogger.logAndCopy("LoadLinks Start", "Data: $data")
 
-        val ref = parseRef(data) ?: return false
+        val ref = parseRef(data) ?: run {
+        ClipboardLogger.logAndCopy("Error", "Không parse được ID từ: $data")
+        return false
+        }
         val type = ref.type
         val tmdbId = ref.id
         val season = ref.season
@@ -401,8 +404,11 @@ class SuperembedProvider : MainAPI() {
             val seen = mutableListOf<String>()
             val result = sniffStream(embedUrl, "$BASE_URL/", ua, seen)
 
+            ClipboardLogger.logAndCopy(
+                "Requests Seen (${seen.size})", 
+                seen.takeLast(15).joinToString("\n") // In 15 request cuối
+            )
             ClipboardLogger.logAndCopy("Result URL", if (result == null) "null" else result.url)
-
             if (result == null) {
                 ClipboardLogger.logAndCopy("Error", "WebView không bắt được link stream.")
                 return false
