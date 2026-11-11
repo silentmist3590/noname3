@@ -52,8 +52,8 @@ object LocalProxy {
         "http://127.0.0.1:${port()}/" + (if (playlist) "p.m3u8" else "seg") + "?u=" + enc(url)
 
     /** Link "lười": proxy tự tải lại trang embed + xin link phát ngay khi trình phát mở (token của site hết hạn rất nhanh). */
-    fun lazy(key: String, embed: String, origin: String, site: String): String =
-        "http://127.0.0.1:${port()}/play.m3u8?k=${enc(key)}&e=${enc(embed)}&o=${enc(origin)}&m=${enc(site)}"
+    fun lazy(name: String, index: Int, embed: String, origin: String, site: String): String =
+        "http://127.0.0.1:${port()}/play.m3u8?k=${enc(name)}&i=$index&e=${enc(embed)}&o=${enc(origin)}&m=${enc(site)}"
 
     private fun abs(base: String, u: String): String =
         try { URI(base).resolve(u).toString() } catch (_: Throwable) { u }
@@ -136,9 +136,13 @@ object LocalProxy {
             var ref: String? = null
             if (servers != null) for (i in 0 until servers.length()) {
                 val o = servers.optJSONObject(i) ?: continue
-                if (o.optString("k") == key) { ref = o.optString("ref"); break }
+                if (key.isNotBlank() && o.optString("name") == key) { ref = o.optString("ref"); break }
             }
-            if (ref == null) { log("server key not found: $key"); return null }
+            if (ref == null && servers != null) {
+                val idx = p["i"]?.toIntOrNull()
+                if (idx != null && idx in 0 until servers.length()) ref = servers.optJSONObject(idx)?.optString("ref")
+            }
+            if (ref == null) { log("server not found: name=$key count=${servers?.length()} names=${(0 until (servers?.length() ?: 0)).joinToString(",") { servers!!.optJSONObject(it)?.optString("name").orEmpty() }}"); return null }
             for (attempt in 0..1) {
                 val u = "$origin/api.php?a=play&ref=${enc(ref)}&t=${enc(t)}" + (if (attempt > 0) "&fresh=1" else "")
                 val r = fetch(u, mapOf("User-Agent" to ua, "Referer" to embed, "Accept" to "application/json, */*"))
