@@ -478,7 +478,12 @@ class SuperembedProvider : MainAPI() {
                 put("Origin", "https://streamingnow.mov")
             }
 
-            val qualities = M3u8Helper.generateM3u8(this.name, result.url, playerReferer, finalHeaders)
+            val qualities = M3u8Helper.generateM3u8(
+                source = this.name,
+                streamUrl = result.url,
+                referer = playerReferer,
+                headers = finalHeaders
+            )
             if (qualities.isNotEmpty()) {
                 qualities.forEach { callback.invoke(it) }
             } else {
