@@ -34,7 +34,6 @@ private const val TMDB_BASE_URL = "https://tmdb-proxy.silentmist3590.workers.dev
 private const val TMDB_API_KEY = "c3d997893bf55c01f39f821b53781547"
 private const val IMG_PROXY = "https://wsrv.nl/?url="
 
-// ⭐ Regex linh hoạt: Tự động bóc tách ID ngay cả khi CloudStream ghép thêm URL phía trước
 private val ID_REGEX = Regex("""(movie|tv):(\d+)(?::(\d+):(\d+))?""")
 private class Ref(val type: String, val id: Int, val season: Int?, val episode: Int?)
 
@@ -70,6 +69,7 @@ object ApiServices {
         }
     }
 
+    // Lấy phụ đề (Vẫn dùng IMDb ID trích xuất từ TMDB để lấy phụ đề chuẩn nhất)
     suspend fun fetchSubtitles(imdbId: String, subtitleCallback: (SubtitleFile) -> Unit) {
         if (imdbId.isEmpty()) return
         try {
@@ -326,7 +326,7 @@ class SuperembedProvider : MainAPI() {
                             wv.dispatchTouchEvent(u)
                             d.recycle(); u.recycle()
                         } catch (_: Exception) {}
-                        if (taps < 80) handler.postDelayed({ tap() }, 1500) 
+                        if (taps < 60) handler.postDelayed({ tap() }, 1500) 
                     }
 
                     wv.webViewClient = object : WebViewClient() {
@@ -376,7 +376,7 @@ class SuperembedProvider : MainAPI() {
                         CommonActivity.activity?.addContentView(wv, ViewGroup.LayoutParams(w, h))
                     } catch (_: Exception) {}
 
-                    handler.postDelayed({ finish(null) }, 180_000L)
+                    handler.postDelayed({ finish(null) }, 120_000L)
                     wv.loadUrl(pageUrl, mapOf("Referer" to referer))
                 } catch (e: Exception) {
                     ClipboardLogger.logAndCopy("Sniff Exception", e.stackTraceToString().take(800))
@@ -387,7 +387,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // LOAD LINKS
+    // LOAD LINKS (Thiết kế tối ưu 100% dựa trên TMDB ID)
     // =====================================================================================
     override suspend fun loadLinks(
         data: String,
@@ -411,69 +411,50 @@ class SuperembedProvider : MainAPI() {
 
         val ua = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
         val fakeReferer = "https://multiembed.mov/"
-        
-        // Ưu tiên lấy IMDb ID
+
+        // Phụ đề vẫn dùng IMDb ID (nếu có), còn video sẽ dùng TMDB
         val imdbId = imdbCache[tmdbId] ?: ""
-        val queryId = if (imdbId.isNotEmpty()) imdbId else tmdbId.toString()
-        val tmdbParam = if (imdbId.isEmpty()) "&tmdb=1" else ""
+        if (imdbId.isNotEmpty()) {
+            ApiServices.fetchSubtitles(imdbId, subtitleCallback)
+        }
 
         try {
-            if (imdbId.isNotEmpty()) {
-                ApiServices.fetchSubtitles(imdbId, subtitleCallback)
-            }
-
-            // ⭐ BƯỚC 1: THỬ NGHIỆM DIRECTSTREAM API (LẤY LINK TRỰC TIẾP)
+            // ⭐ BƯỚC 1: THỬ NGHIỆM DIRECTSTREAM API BẰNG TMDB ID
             val directUrl = if (type == "movie") {
-                "$BASE_URL/directstream.php?video_id=$queryId$tmdbParam"
+                "$BASE_URL/directstream.php?video_id=$tmdbId&tmdb=1"
             } else {
-                "$BASE_URL/directstream.php?video_id=$queryId$tmdbParam&s=$season&e=$episode"
+                "$BASE_URL/directstream.php?video_id=$tmdbId&tmdb=1&s=$season&e=$episode"
             }
 
-            ClipboardLogger.logAndCopy("Direct API", "Thử direct API: $directUrl")
+            ClipboardLogger.logAndCopy("Direct API", "Thử: $directUrl")
             
-            try {
-                val directRes = app.get(directUrl, headers = mapOf("User-Agent" to ua, "Referer" to fakeReferer)).text
-                val directM3u8 = Regex("""https?://[^"'\\\s]+\.m3u8[^"'\\\s]*""", RegexOption.IGNORE_CASE)
-                    .find(directRes)?.value
+            val directRes = app.get(directUrl, headers = mapOf("User-Agent" to ua, "Referer" to fakeReferer)).text
+            val directM3u8 = Regex("""https?://[^"'\\\s]+\.m3u8[^"'\\\s]*""", RegexOption.IGNORE_CASE)
+                .find(directRes)?.value
 
-                if (directM3u8 != null) {
-                    ClipboardLogger.logAndCopy("Direct Success", "Tìm thấy M3U8 qua direct API: $directM3u8")
-                    
-                    val m3u8Headers = mapOf(
-                        "User-Agent" to ua,
-                        "Referer" to "https://streamingnow.mov/",
-                        "Origin" to "https://streamingnow.mov"
-                    )
-
-                    val qualities = M3u8Helper.generateM3u8(
-                        source = this.name,
-                        streamUrl = directM3u8,
-                        referer = "https://streamingnow.mov/",
-                        headers = m3u8Headers
-                    )
-
-                    if (qualities.isNotEmpty()) {
-                        qualities.forEach { callback.invoke(it) }
-                    } else {
-                        callback.invoke(
-                            newExtractorLink(this.name, "MultiEmbed Direct", directM3u8, ExtractorLinkType.M3U8) {
-                                this.referer = "https://streamingnow.mov/"
-                                this.quality = Qualities.P1080.value
-                                this.headers = m3u8Headers
-                            }
-                        )
-                    }
-                    return true
+            if (directM3u8 != null) {
+                ClipboardLogger.logAndCopy("Direct Success", "Tìm thấy M3U8: $directM3u8")
+                val m3u8Headers = mapOf(
+                    "User-Agent" to ua,
+                    "Referer" to "https://streamingnow.mov/",
+                    "Origin" to "https://streamingnow.mov"
+                )
+                val qualities = M3u8Helper.generateM3u8(this.name, directM3u8, "https://streamingnow.mov/", m3u8Headers)
+                if (qualities.isNotEmpty()) {
+                    qualities.forEach { callback.invoke(it) }
+                } else {
+                    callback.invoke(newExtractorLink(this.name, "MultiEmbed Direct", directM3u8, ExtractorLinkType.M3U8) {
+                        this.referer = "https://streamingnow.mov/"; this.quality = Qualities.P1080.value; this.headers = m3u8Headers
+                    })
                 }
-            } catch (e: Exception) {
-                ClipboardLogger.logAndCopy("Direct API Error", e.message ?: "Unknown")
+                return true
             }
 
-            // ⭐ BƯỚC 2: DÙNG WEBVIEW LÀM PHƯƠNG ÁN DỰ PHÒNG
+            // ⭐ BƯỚC 2: NẾU DIRECT API THẤT BẠI, DÙNG WEBVIEW VỚI TMDB ID
             val embedUrl = if (type == "movie") {
-                "$BASE_URL/?video_id=$queryId$tmdbParam"
+                "$BASE_URL/?video_id=$tmdbId&tmdb=1"
             } else {
-                "$BASE_URL/?video_id=$queryId$tmdbParam&s=$season&e=$episode"
+                "$BASE_URL/?video_id=$tmdbId&tmdb=1&s=$season&e=$episode"
             }
 
             ClipboardLogger.logAndCopy("Fallback WebView", "Tải WebView: $embedUrl")
@@ -492,23 +473,13 @@ class SuperembedProvider : MainAPI() {
                 put("Origin", "https://streamingnow.mov")
             }
 
-            val qualities = M3u8Helper.generateM3u8(
-                source = this.name,
-                streamUrl = result.url,
-                referer = playerReferer,
-                headers = finalHeaders
-            )
-
+            val qualities = M3u8Helper.generateM3u8(this.name, result.url, playerReferer, finalHeaders)
             if (qualities.isNotEmpty()) {
                 qualities.forEach { callback.invoke(it) }
             } else {
-                callback.invoke(
-                    newExtractorLink(this.name, "MultiEmbed", result.url, ExtractorLinkType.M3U8) {
-                        this.referer = playerReferer
-                        this.quality = Qualities.P1080.value
-                        this.headers = finalHeaders
-                    }
-                )
+                callback.invoke(newExtractorLink(this.name, "MultiEmbed", result.url, ExtractorLinkType.M3U8) {
+                    this.referer = playerReferer; this.quality = Qualities.P1080.value; this.headers = finalHeaders
+                })
             }
             return true
 
