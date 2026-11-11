@@ -1,6 +1,7 @@
 package com.movieuniverse
 
 import com.lagradost.cloudstream3.app
+import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.InetAddress
@@ -50,9 +51,9 @@ object LocalProxy {
     fun wrap(url: String, playlist: Boolean = isPlaylistUrl(url)): String =
         "http://127.0.0.1:${port()}/" + (if (playlist) "p.m3u8" else "seg") + "?u=" + enc(url)
 
-    /** Link "lười": proxy sẽ xin link mới khi trình phát thực sự mở nó. */
-    fun lazy(ref: String, t: String, embed: String, origin: String): String =
-        "http://127.0.0.1:${port()}/play.m3u8?ref=${enc(ref)}&t=${enc(t)}&e=${enc(embed)}&o=${enc(origin)}"
+    /** Link "lười": proxy tự tải lại trang embed + xin link phát ngay khi trình phát mở (token của site hết hạn rất nhanh). */
+    fun lazy(key: String, embed: String, origin: String, site: String): String =
+        "http://127.0.0.1:${port()}/play.m3u8?k=${enc(key)}&e=${enc(embed)}&o=${enc(origin)}&m=${enc(site)}"
 
     private fun abs(base: String, u: String): String =
         try { URI(base).resolve(u).toString() } catch (_: Throwable) { u }
@@ -92,20 +93,67 @@ object LocalProxy {
         }
     }
 
+    private val cache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, String>>()
+
+    private fun jsonAfter(html: String, marker: String): JSONObject? {
+        val i = html.indexOf(marker)
+        if (i < 0) return null
+        val st = html.indexOf('{', i)
+        if (st < 0) return null
+        var depth = 0
+        var inStr = false
+        var esc = false
+        for (k in st until html.length) {
+            val c = html[k]
+            if (inStr) {
+                if (esc) esc = false else if (c == '\\') esc = true else if (c == '"') inStr = false
+            } else when (c) {
+                '"' -> inStr = true
+                '{' -> depth++
+                '}' -> { depth--; if (depth == 0) return try { JSONObject(html.substring(st, k + 1)) } catch (_: Throwable) { null } }
+            }
+        }
+        return null
+    }
+
     private fun mint(p: Map<String, String>): String? {
         val origin = p["o"] ?: return null
-        for (attempt in 0..1) {
-            try {
-                val u = "$origin/api.php?a=play&ref=${enc(p["ref"] ?: "")}&t=${enc(p["t"] ?: "")}" + (if (attempt > 0) "&fresh=1" else "")
-                val r = fetch(u, mapOf("User-Agent" to ua, "Referer" to (p["e"] ?: "$origin/"), "Accept" to "application/json, */*"))
+        val embed = p["e"] ?: return null
+        val key = p["k"] ?: ""
+        val ck = "$embed|$key"
+        cache[ck]?.let { if (System.currentTimeMillis() - it.first < 15_000) return it.second }
+        try {
+            val er = fetch(embed, mapOf("User-Agent" to ua, "Referer" to (p["m"] ?: "$origin/")))
+            val q = jsonAfter(String(er.bytes, Charsets.UTF_8), "var Q")
+            if (q == null) { log("embed no Q code=${er.code}"); return null }
+            val t = q.optString("t")
+            var servers = q.optJSONObject("ssr")?.optJSONArray("servers")
+            if (servers == null || servers.length() == 0) {
+                val qs = "type=${q.optString("type")}&id=${enc(q.optString("id"))}&s=${q.optInt("s")}&e=${q.optInt("e")}&t=${enc(t)}"
+                val sr = fetch("$origin/api.php?a=sources&$qs", mapOf("User-Agent" to ua, "Referer" to embed, "Accept" to "application/json, */*"))
+                servers = try { JSONObject(String(sr.bytes, Charsets.UTF_8)).optJSONArray("servers") } catch (_: Throwable) { null }
+            }
+            var ref: String? = null
+            if (servers != null) for (i in 0 until servers.length()) {
+                val o = servers.optJSONObject(i) ?: continue
+                if (o.optString("k") == key) { ref = o.optString("ref"); break }
+            }
+            if (ref == null) { log("server key not found: $key"); return null }
+            for (attempt in 0..1) {
+                val u = "$origin/api.php?a=play&ref=${enc(ref)}&t=${enc(t)}" + (if (attempt > 0) "&fresh=1" else "")
+                val r = fetch(u, mapOf("User-Agent" to ua, "Referer" to embed, "Accept" to "application/json, */*"))
                 val body = String(r.bytes, Charsets.UTF_8)
                 val m = Regex("\"url\"\\s*:\\s*\"([^\"]+)\"").find(body)
-                if (m != null) return abs(p["e"] ?: origin, m.groupValues[1].replace("\\/", "/"))
+                if (m != null) {
+                    val res = abs(embed, m.groupValues[1].replace("\\/", "/"))
+                    cache[ck] = System.currentTimeMillis() to res
+                    return res
+                }
                 log("mint fail code=${r.code} ${body.take(100)}")
                 if (r.code == 429) Thread.sleep(1500)
-            } catch (e: Throwable) {
-                log("mint ERR ${e.message}")
             }
+        } catch (e: Throwable) {
+            log("mint ERR ${e.message}")
         }
         return null
     }
