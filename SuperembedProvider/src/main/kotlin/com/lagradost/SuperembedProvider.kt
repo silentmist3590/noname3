@@ -243,7 +243,8 @@ class SuperembedProvider : MainAPI() {
         referer: String,
         ua: String,
         seen: MutableList<String>,
-        collected: MutableList<String> = mutableListOf()
+        collected: MutableList<String> = mutableListOf(),
+        servers: MutableList<Pair<String, List<String>>> = mutableListOf()
     ): SniffResult? {
         return suspendCoroutine { cont ->
             val handler = Handler(Looper.getMainLooper())
@@ -275,6 +276,8 @@ class SuperembedProvider : MainAPI() {
                         cont.resume(res)
                     }
 
+                    val capture = mutableListOf<String>()
+                    var driverActive = false
                     val streamRegex = Regex("""\.m3u8|\.mpd|master\.txt""", RegexOption.IGNORE_CASE)
                     val junkRegex = Regex("""\.(css|png|jpe?g|gif|svg|ico|woff2?|ttf)(\?|$)""", RegexOption.IGNORE_CASE)
 
@@ -436,22 +439,44 @@ class SuperembedProvider : MainAPI() {
                                 synchronized(collected) {
                                     if (!collected.contains(u)) { collected.add(u); first = collected.size == 1 }
                                 }
-                                // Trang đã tải danh sách server: chờ vài giây cho các request còn lại rồi dừng WebView
                                 if (first) {
-                                    // Ghi lại DOM của trang player (danh sách server, iframe) để biết cách chọn server
+                                    // Trang player đã có danh sách server: lần lượt bấm từng server, ghi lại host/stream mà mỗi server gọi
                                     handler.postDelayed({
-                                        try {
-                                            wv.evaluateJavascript(
-                                                "(function(){var c=document.documentElement.cloneNode(true);c.querySelectorAll('script,style,svg,noscript').forEach(function(e){e.remove()});var f=[];document.querySelectorAll('iframe').forEach(function(i){f.push(i.src)});return c.outerHTML.replace(/\\s+/g,' ').slice(0,7000)+'\\n@@IFRAMES@@\\n'+f.join('\\n');})()"
-                                            ) { raw ->
-                                                val html = try { org.json.JSONArray("[" + (raw ?: "\"\"") + "]").optString(0) } catch (_: Exception) { raw ?: "" }
-                                                ClipboardLogger.logAndCopy("PlayerDOM", html)
+                                        if (finished) return@postDelayed
+                                        driverActive = true
+                                        wv.evaluateJavascript(
+                                            "(function(){return JSON.stringify([].slice.call(document.querySelectorAll('ul.sources-list li[data-server]')).map(function(l){var n=l.querySelector('.server-name');return {s:l.getAttribute('data-server'),n:(n?n.textContent:l.textContent).trim()}}));})()"
+                                        ) { raw ->
+                                            val list = try {
+                                                val arr = org.json.JSONArray(org.json.JSONArray("[" + (raw ?: "\"[]\"") + "]").optString(0))
+                                                (0 until arr.length()).map { arr.getJSONObject(it).optString("s") to arr.getJSONObject(it).optString("n") }
+                                            } catch (_: Exception) { emptyList() }
+                                            ClipboardLogger.logAndCopy("ServerList", list.joinToString { "${it.second}(${it.first})" })
+                                            var i = 0
+                                            fun step() {
+                                                if (finished) return
+                                                if (i >= list.size) { handler.postDelayed({ finish(null) }, 1500L); return }
+                                                val (sid, nm) = list[i]
+                                                i++
+                                                val mark = synchronized(capture) { capture.size }
+                                                wv.evaluateJavascript(
+                                                    "(function(){var l=document.querySelector('ul.sources-list li[data-server=\"" + sid + "\"]');if(l){l.click();return 1}return 0})()", null
+                                                )
+                                                handler.postDelayed({
+                                                    val got = synchronized(capture) { capture.drop(mark).toList() }
+                                                    val skip = listOf("streamingnow.mov", "multiembed.mov", "cloudflare", "gstatic", "googleapis", "google", "histats", "cloudfront", "facebook")
+                                                    val useful = got.filter { x -> skip.none { x.contains(it, true) } && AD_DOMAINS.none { x.contains(it, true) } }.distinct()
+                                                    servers.add(nm to useful)
+                                                    ClipboardLogger.logAndCopy("Server $nm", useful.take(8).joinToString("\n").ifEmpty { "(không có request ngoài)" })
+                                                    step()
+                                                }, 4500L)
                                             }
-                                        } catch (_: Exception) {}
-                                    }, 4500L)
-                                    handler.postDelayed({ finish(null) }, 8500L)
+                                            if (list.isEmpty()) handler.postDelayed({ finish(null) }, 500L) else step()
+                                        }
+                                    }, 3500L)
                                 }
                             }
+                            if (!junkRegex.containsMatchIn(u)) synchronized(capture) { if (capture.size < 600) capture.add(u.take(400)) }
                             if (!junkRegex.containsMatchIn(u) && seen.size < 200) {
                                 seen.add(u.take(220))
                             }
@@ -459,7 +484,7 @@ class SuperembedProvider : MainAPI() {
                             if (streamRegex.containsMatchIn(u) && !u.contains("/embed/iframe_player/")) {
                                 val hit = SniffResult(u, reqHeaders)
                                 ClipboardLogger.logAndCopy("Sniff HIT", "URL: $u")
-                                handler.post { finish(hit) }
+                                if (!driverActive) handler.post { finish(hit) }
                             }
                             return null
                         }
@@ -763,22 +788,34 @@ class SuperembedProvider : MainAPI() {
             ClipboardLogger.logAndCopy("WebView", "Tải: $embedUrl")
             val seen = mutableListOf<String>()
             val playUrls = mutableListOf<String>()
-            val result = sniffStream(embedUrl, fakeReferer, ua, seen, playUrls)
+            val serverHits = mutableListOf<Pair<String, List<String>>>()
+            val result = sniffStream(embedUrl, fakeReferer, ua, seen, playUrls, serverHits)
 
             if (result == null && playUrls.isNotEmpty()) {
-                ClipboardLogger.logAndCopy("Servers", "Tìm thấy ${playUrls.size} server (playvideo.php)")
-                val hosts = Regex("mixdrop|streamtape|doodstream|dood\\.|voe\\.|filemoon|vidoza|streamwish|upstream|mp4upload|embedsito|lulustream", RegexOption.IGNORE_CASE)
-                val embeds = seen.filter { it.startsWith("http") && hosts.containsMatchIn(it) }.distinct()
-                ClipboardLogger.logAndCopy("Embeds", embeds.joinToString("\n").ifEmpty { "(không có)" })
                 var n = 0
-                for (e in embeds.take(6)) {
-                    try {
-                        loadExtractor(e, "https://streamingnow.mov/", subtitleCallback) { n++; callback(it) }
-                    } catch (ex: Exception) {
-                        if (ex is java.util.concurrent.CancellationException) throw ex
+                val done = HashSet<String>()
+                for ((nm, urls) in serverHits) {
+                    for (u in urls) {
+                        if (!done.add(u)) continue
+                        try {
+                            if (u.contains(".m3u8", true)) {
+                                n++
+                                callback(newExtractorLink(this.name, "MultiEmbed $nm", u, ExtractorLinkType.M3U8) {
+                                    this.referer = "https://streamingnow.mov/"
+                                    this.quality = Qualities.Unknown.value
+                                    this.headers = mapOf("User-Agent" to ua, "Referer" to "https://streamingnow.mov/")
+                                })
+                            } else if (u.startsWith("http") && !Regex("""\.(js|css|png|jpe?g|gif|svg|ico|woff2?|ttf|json)(\?|$)""", RegexOption.IGNORE_CASE).containsMatchIn(u)) {
+                                val before = n
+                                loadExtractor(u, "https://streamingnow.mov/", subtitleCallback) { n++; callback(it) }
+                                ClipboardLogger.logAndCopy("Extractor $nm", "${u.take(100)} -> ${n - before} link")
+                            }
+                        } catch (ex: Exception) {
+                            if (ex is java.util.concurrent.CancellationException) throw ex
+                        }
                     }
                 }
-                ClipboardLogger.logAndCopy("Extractor", "Số link: $n")
+                ClipboardLogger.logAndCopy("Kết quả", "Tổng $n link")
                 return n > 0
             }
 
