@@ -275,13 +275,13 @@ class MovieuniverseProvider : MainAPI() {
         }
     }
 
-    private suspend fun emitStream(url: String, label: String, embed: String, callback: (ExtractorLink) -> Unit, remint: (suspend () -> String?)? = null) {
+    private suspend fun emitStream(url: String, label: String, embed: String, callback: (ExtractorLink) -> Unit, remint: (suspend () -> String?)? = null, lazyUrl: String? = null) {
         val origin = Regex("^https?://[^/]+").find(embed)?.value ?: mainUrl
         val isM3u8 = url.contains(".m3u8", true) || url.contains("/hls", true) || url.contains("playlist", true) || url.contains("_stream") || url.contains("cap.php")
         // Phân đoạn video cần Referer (một số nguồn), không gửi Origin
         val h = mapOf("User-Agent" to ua, "Referer" to "$origin/")
         fun px(u: String) = if (proxyOk) LocalProxy.wrap(u) else u
-        if (isM3u8 && !diagDone && url.contains("_stream") && remint != null) {
+        if (false && isM3u8 && !diagDone && url.contains("_stream") && remint != null) {
             diagDone = true
             remint.invoke()?.let { diag(it, origin) }
         }
@@ -292,6 +292,17 @@ class MovieuniverseProvider : MainAPI() {
                 val hasAudio = txt.contains("#EXT-X-MEDIA:TYPE=AUDIO")
                 if (!txt.contains("#EXTM3U")) {
                     ClipboardLogger.logAndCopy("Master Bad $label", "code=${mr.code}\n${txt.take(200)}")
+                    return
+                }
+                if (proxyOk && lazyUrl != null) {
+                    val height = Regex("RESOLUTION=\\d+x(\\d+)").findAll(txt).mapNotNull { it.groupValues[1].toIntOrNull() }.maxOrNull()
+                    callback(
+                        newExtractorLink(name, "$label ${height?.let { "${it}p" } ?: ""}".trim(), lazyUrl, ExtractorLinkType.M3U8) {
+                            this.referer = ""
+                            this.quality = height ?: Qualities.Unknown.value
+                            this.headers = emptyMap()
+                        }
+                    )
                     return
                 }
                 if (!hasAudio && txt.contains("#EXT-X-STREAM-INF")) {
@@ -441,7 +452,7 @@ class MovieuniverseProvider : MainAPI() {
                                             val rr = app.get("$eOrigin/api.php?a=play&ref=" + URLEncoder.encode(ref, "UTF-8") + "&t=" + URLEncoder.encode(t, "UTF-8") + "&fresh=1", headers = eh, cookies = ck, timeout = 30)
                                             JSONObject(rr.text).optString("url").replace("\\/", "/").takeIf { it.isNotBlank() }?.let { absUrl(embed, it) }
                                         } catch (_: Throwable) { null }
-                                    })
+                                    }, if (proxyOk) LocalProxy.lazy(ref, t, embed, eOrigin) else null)
                                     found = true
                                 }
                             }
