@@ -48,6 +48,7 @@ private fun parseRef(s: String): Ref? {
 
 private data class SniffResult(val url: String, val headers: Map<String, String>)
 
+// ⭐ BỔ SUNG CÁC DOMAIN QUẢNG CÁO MỚI TỪ LOG
 private val AD_DOMAINS = listOf(
     "doubleclick.net", "googlesyndication.com", "googleadservices.com",
     "popads.net", "onclickads.net", "propellerads.com", "popcash.net",
@@ -55,13 +56,9 @@ private val AD_DOMAINS = listOf(
     "adexchangerapid.com", "googletagmanager.com", "googletagservices.com",
     "crwdcntrl.net", "tynt.com", "mrktmtrcs.net", "dtscout.com", "onaudience.com",
     "histats.com", "luugy.com", "llvpn.com", "rtmark.net", "dvzcfqpdoaxtr.website",
-    "adsco.re", "ntwkbc21.com", "ntwkbc42.com", "usrpubtrck.com", "cdn4ads.com"
-)
-
-// Domain của player - được phép điều hướng
-private val ALLOWED_DOMAINS = listOf(
-    "multiembed.mov", "streamingnow.mov",
-    "cloudflare.com", "challenges.cloudflare.com"
+    "adsco.re", "ntwkbc21.com", "ntwkbc42.com", "usrpubtrck.com", "cdn4ads.com",
+    // ⭐ CÁC DOMAIN MỚI TỪ LOG CỦA BẠN
+    "bkkunbeurvocc.website", "enveulpwblred.space", "my.rtmark.net"
 )
 
 // =====================================================================================
@@ -235,7 +232,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // WEBVIEW SNIFFER (CHIẾN LƯỢC MỚI: POPUP THẬT, CHẶN NAV, ĐÓNG NGAY)
+    // WEBVIEW SNIFFER (ĐÃ FIX: GIẢM CLICK, CHẶN THÊM AD DOMAIN, XỬ LÝ POPUP HỢP LÝ)
     // =====================================================================================
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun sniffStream(
@@ -286,11 +283,9 @@ class SuperembedProvider : MainAPI() {
                         setSupportMultipleWindows(true)
                         userAgentString = ua
                         mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                        // ⭐ Cho phép load nội dung HTTP
-                        mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                     }
 
-                    // ⭐ CHIẾN LƯỢC MỚI: TẠO POPUP THẬT NHƯNG CHẶN HOÀN TOÀN NAVIGATION
+                    // Tạo popup thật nhưng chỉ cho mở tối đa 10 cái
                     wv.webChromeClient = object : WebChromeClient() {
                         override fun onCreateWindow(
                             view: WebView?,
@@ -300,7 +295,11 @@ class SuperembedProvider : MainAPI() {
                         ): Boolean {
                             try {
                                 popupCount++
-                                ClipboardLogger.logAndCopy("Popup #$popupCount", "Đã mở popup giả")
+                                if (popupCount > 10) {
+                                    // Đã đủ popup, không mở thêm để tránh bùng nổ
+                                    return false
+                                }
+                                ClipboardLogger.logAndCopy("Popup #$popupCount", "Đã mở popup")
                                 
                                 val popup = WebView(ctx)
                                 popup.settings.apply {
@@ -309,42 +308,29 @@ class SuperembedProvider : MainAPI() {
                                     userAgentString = ua
                                 }
                                 
-                                // ⭐ BLOCK TOÀN BỘ NAVIGATION TRONG POPUP
-                                // Không có request nào được ra ngoài → không có "mở trình duyệt"
                                 popup.webViewClient = object : WebViewClient() {
-                                    override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
-                                        // Block tất cả
-                                        return true
-                                    }
-                                    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                                        // Block tất cả
-                                        return true
-                                    }
+                                    override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean = true
+                                    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = true
                                     override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
-                                        // Trả về response rỗng cho mọi request
                                         return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream("".toByteArray()))
                                     }
                                 }
                                 
-                                // Gắn vào transport để player thấy popup đã mở thành công
                                 val transport = resultMsg?.obj as? WebView.WebViewTransport
                                 transport?.webView = popup
                                 resultMsg?.sendToTarget()
                                 
-                                // ⭐ Tự động đóng sau 3 giây (mô phỏng user đóng tab)
                                 handler.postDelayed({
                                     try { popup.stopLoading(); popup.destroy() } catch (_: Exception) {}
-                                }, 3000)
+                                }, 2000)
                                 
                                 return true
                             } catch (e: Exception) {
-                                ClipboardLogger.logAndCopy("Popup Error", e.message ?: "")
                                 return false
                             }
                         }
                     }
 
-                    // Script chống bot (không override window.open nữa, để popup thật)
                     val antiBotJs = """
                         (function() {
                             Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
@@ -352,38 +338,14 @@ class SuperembedProvider : MainAPI() {
                             Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
                             window.chrome = { runtime: {} };
                             
-                            // Chặn location redirect
                             try {
-                                var _loc = window.location;
                                 window.location.assign = function() {};
                                 window.location.replace = function() {};
                             } catch(e) {}
-                            
-                            // Chặn click vào <a target="_blank"> (gây "mở trình duyệt")
-                            document.addEventListener('click', function(e) {
-                                var target = e.target;
-                                while (target && target.tagName !== 'A') target = target.parentElement;
-                                if (target && target.tagName === 'A') {
-                                    var href = target.getAttribute('href');
-                                    if (href) {
-                                        var lower = href.toLowerCase();
-                                        if (lower.startsWith('intent://') || 
-                                            lower.startsWith('market://') || 
-                                            lower.startsWith('tel:') || 
-                                            lower.startsWith('sms:') || 
-                                            lower.startsWith('mailto:') ||
-                                            lower.startsWith('whatsapp://')) {
-                                            e.preventDefault();
-                                            e.stopPropagation();
-                                            return false;
-                                        }
-                                    }
-                                }
-                            }, true);
                         })();
                     """.trimIndent()
 
-                    // Script click
+                    // Script click đơn giản hơn - chỉ click video và nút play
                     val clickJs = """
                         (function() {
                             function fire(sel) {
@@ -392,16 +354,29 @@ class SuperembedProvider : MainAPI() {
                                     try { els[i].click(); } catch(e) {}
                                 }
                             }
-                            fire('#bigPlay');
-                            fire('.jw-icon-display, .jw-display-icon-container, .jw-bigplay');
-                            fire('.vjs-big-play-button, .play-btn, .play-button');
-                            fire('media-player, media-play-button, [data-media-button]');
-                            fire('button[aria-label="Play"], [aria-label="Play"]');
                             
-                            var overlays = document.querySelectorAll('div[style*="z-index: 999999"], div[style*="z-index: 2147483647"]');
+                            // Xóa overlay quảng cáo che nút Play
+                            var overlays = document.querySelectorAll('div[style*="z-index: 999999"], div[style*="z-index: 2147483647"], iframe[id*="ad"], iframe[src*="bkkunbeur"], iframe[src*="enveulpwb"]');
                             for (var i = 0; i < overlays.length; i++) {
                                 try { overlays[i].remove(); } catch(e) {}
                             }
+                            
+                            // Xóa ad iframes
+                            var iframes = document.querySelectorAll('iframe');
+                            for (var i = 0; i < iframes.length; i++) {
+                                var src = iframes[i].src || '';
+                                if (src.indexOf('bkkunbeur') !== -1 || 
+                                    src.indexOf('enveulpwb') !== -1 ||
+                                    src.indexOf('ad') !== -1 ||
+                                    iframes[i].getAttribute('data-ad') !== null) {
+                                    try { iframes[i].remove(); } catch(e) {}
+                                }
+                            }
+                            
+                            fire('#bigPlay');
+                            fire('.jw-icon-display, .jw-display-icon-container, .jw-bigplay');
+                            fire('.vjs-big-play-button, .play-btn, .play-button');
+                            fire('button[aria-label="Play"], [aria-label="Play"]');
 
                             var v = document.querySelector('video');
                             if (v) {
@@ -419,10 +394,17 @@ class SuperembedProvider : MainAPI() {
                             taps++
                             try {
                                 wv.evaluateJavascript(antiBotJs + clickJs, null)
+                                // Chỉ click 1 vị trí mỗi lần để tránh spam popup
                                 sendTouch(wv, w / 2f, h / 2f)
-                                sendTouch(wv, w / 2f, h * 0.7f)
                             } catch (_: Exception) {}
-                            if (taps < 80) handler.postDelayed({ tap() }, 1500)
+                            
+                            // Chỉ click 15 lần, mỗi 2 giây = 30 giây
+                            if (taps < 15) {
+                                handler.postDelayed({ tap() }, 2000)
+                            } else {
+                                ClipboardLogger.logAndCopy("Tap", "Đã click 15 lần, chờ thêm 10 giây cuối...")
+                                handler.postDelayed({ finish(null) }, 10_000L)
+                            }
                         } else {
                             handler.postDelayed({ tap() }, 1000)
                         }
@@ -444,6 +426,7 @@ class SuperembedProvider : MainAPI() {
                             val u = request?.url?.toString() ?: return null
                             val reqHeaders = request?.requestHeaders ?: emptyMap()
 
+                            // ⭐ CHẶN CỨNG CÁC DOMAIN QUẢNG CÁO MỚI
                             if (AD_DOMAINS.any { u.contains(it, ignoreCase = true) }) {
                                 seen.add("BLOCKED AD: " + u.take(100))
                                 return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream("".toByteArray()))
@@ -461,7 +444,6 @@ class SuperembedProvider : MainAPI() {
                             return null
                         }
 
-                        // ⭐ CHẶN TẤT CẢ SCHEME ĐỘC HẠI (nguồn gốc của "mở trình duyệt")
                         override fun shouldOverrideUrlLoading(
                             view: WebView?,
                             request: WebResourceRequest?
@@ -470,24 +452,15 @@ class SuperembedProvider : MainAPI() {
                             
                             // Block ads
                             if (AD_DOMAINS.any { u.contains(it, ignoreCase = true) }) {
-                                seen.add("BLOCKED AD NAV: " + u.take(100))
                                 return true
                             }
                             
-                            // ⭐ Block tất cả scheme không phải http/https
+                            // Block scheme độc hại
                             if (!u.startsWith("http://") && !u.startsWith("https://")) {
-                                seen.add("BLOCKED SCHEME: " + u.take(100))
                                 return true
                             }
                             
-                            // Allow navigation trong domain của player
-                            if (ALLOWED_DOMAINS.any { u.contains(it, ignoreCase = true) }) {
-                                return false
-                            }
-                            
-                            // Block tất cả navigation khác (quảng cáo)
-                            seen.add("BLOCKED NAV: " + u.take(100))
-                            return true
+                            return false
                         }
 
                         override fun onPageFinished(view: WebView?, url: String?) {
@@ -502,7 +475,7 @@ class SuperembedProvider : MainAPI() {
                                     ClipboardLogger.logAndCopy("Cloudflare", "Đã vượt qua! Bắt đầu...")
                                     isChallengePassed = true
                                 }
-                                handler.postDelayed({ tap() }, 800)
+                                handler.postDelayed({ tap() }, 1500)
                             }
                         }
 
@@ -530,7 +503,8 @@ class SuperembedProvider : MainAPI() {
                         CommonActivity.activity?.addContentView(wv, ViewGroup.LayoutParams(w, h))
                     } catch (_: Exception) {}
 
-                    handler.postDelayed({ finish(null) }, 180_000L)
+                    // Tổng timeout 120 giây (giảm từ 180s vì click ít hơn)
+                    handler.postDelayed({ finish(null) }, 120_000L)
                     wv.loadUrl(pageUrl, mapOf("Referer" to referer))
 
                 } catch (e: Exception) {
@@ -595,7 +569,7 @@ class SuperembedProvider : MainAPI() {
             val result = sniffStream(embedUrl, fakeReferer, ua, seen)
 
             if (result == null) {
-                ClipboardLogger.logAndCopy("Error", "WebView không bắt được link stream.\nSeen: ${seen.takeLast(10).joinToString("\n")}")
+                ClipboardLogger.logAndCopy("Error", "WebView không bắt được link stream.\nSeen cuối: ${seen.takeLast(5).joinToString("\n")}")
                 return false
             }
 
