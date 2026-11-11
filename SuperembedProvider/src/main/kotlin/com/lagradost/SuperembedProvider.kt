@@ -231,32 +231,54 @@ class SuperembedProvider : MainAPI() {
     // PHƯƠNG THỨC CLICK CHUỘT THẬT (REAL MOUSE CLICK)
     // =====================================================================================
     private fun realMouseClick(wv: WebView, x: Float, y: Float, handler: Handler) {
-        val downTime = SystemClock.uptimeMillis()
+    val downTime = SystemClock.uptimeMillis()
 
-        // 1. HOVER_MOVE (di chuyển chuột đến tọa độ)
-        val hover = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_HOVER_MOVE, x, y, 0)
-        hover.source = InputDevice.SOURCE_MOUSE
-        wv.dispatchGenericMotionEvent(hover)
-        hover.recycle()
+    // 1. HOVER_MOVE (di chuyển chuột đến tọa độ)
+    val hover = MotionEvent.obtain(
+        downTime, downTime,
+        MotionEvent.ACTION_HOVER_MOVE, x, y, 0
+    )
+    // Gán source qua reflection hoặc dùng obtain có source
+    // Cách đơn giản nhất: Dùng obtain với đầy đủ tham số (API 29+)
+    // Nếu không có, hãy dùng reflection (xem bên dưới)
+    wv.dispatchGenericMotionEvent(hover)
+    hover.recycle()
 
-        // 2. ACTION_DOWN (nhấn chuột trái)
-        handler.postDelayed({
-            val down = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_DOWN, x, y, 0)
-            down.source = InputDevice.SOURCE_MOUSE
-            down.buttonState = MotionEvent.BUTTON_PRIMARY
-            wv.dispatchTouchEvent(down)
-            down.recycle()
-        }, 50)
+    // 2. ACTION_DOWN (nhấn chuột trái)
+    handler.postDelayed({
+        val down = MotionEvent.obtain(
+            downTime, SystemClock.uptimeMillis(),
+            MotionEvent.ACTION_DOWN, x, y, 0
+        )
+        // Dùng reflection để set source và buttonState
+        try {
+            val setSource = MotionEvent::class.java.getMethod("setSource", Int::class.javaPrimitiveType)
+            setSource.invoke(down, InputDevice.SOURCE_MOUSE)
+            val setButtonState = MotionEvent::class.java.getMethod("setButtonState", Int::class.javaPrimitiveType)
+            setButtonState.invoke(down, MotionEvent.BUTTON_PRIMARY)
+        } catch (_: Exception) {}
+        
+        wv.dispatchTouchEvent(down)
+        down.recycle()
+    }, 50)
 
-        // 3. ACTION_UP (nhả chuột trái)
-        handler.postDelayed({
-            val up = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, x, y, 0)
-            up.source = InputDevice.SOURCE_MOUSE
-            up.actionButton = MotionEvent.BUTTON_PRIMARY
-            wv.dispatchTouchEvent(up)
-            up.recycle()
-        }, 120)
-    }
+    // 3. ACTION_UP (nhả chuột trái)
+    handler.postDelayed({
+        val up = MotionEvent.obtain(
+            downTime, SystemClock.uptimeMillis(),
+            MotionEvent.ACTION_UP, x, y, 0
+        )
+        try {
+            val setSource = MotionEvent::class.java.getMethod("setSource", Int::class.javaPrimitiveType)
+            setSource.invoke(up, InputDevice.SOURCE_MOUSE)
+            val setActionButton = MotionEvent::class.java.getMethod("setActionButton", Int::class.javaPrimitiveType)
+            setActionButton.invoke(up, MotionEvent.BUTTON_PRIMARY)
+        } catch (_: Exception) {}
+        
+        wv.dispatchTouchEvent(up)
+        up.recycle()
+    }, 120)
+}
 
     /**
      * Tìm tọa độ nút Play bằng JS, sau đó gửi click chuột thật vào tọa độ đó.
