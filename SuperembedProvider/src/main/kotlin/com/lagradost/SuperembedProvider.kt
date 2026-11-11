@@ -58,7 +58,8 @@ private val AD_DOMAINS = listOf(
     "histats.com", "luugy.com", "llvpn.com", "rtmark.net", "dvzcfqpdoaxtr.website",
     "adsco.re", "ntwkbc21.com", "ntwkbc42.com", "usrpubtrck.com", "cdn4ads.com",
     // ⭐ CÁC DOMAIN MỚI TỪ LOG CỦA BẠN
-    "bkkunbeurvocc.website", "enveulpwblred.space", "my.rtmark.net"
+    "bkkunbeurvocc.website", "enveulpwblred.space", "my.rtmark.net",
+    "bdcdmyzacrjkh.space", "acscdn.com", "aclib.net", "createlouisville.org", "workdeadlinededicate.com", "protrafficinspector.com", "push-sdk.com", "portalfluently.com"
 )
 
 // =====================================================================================
@@ -373,6 +374,10 @@ class SuperembedProvider : MainAPI() {
                                 }
                             }
                             
+                            // Trang streamingnow.mov: nút Play (.play-button) bật Turnstile rồi submit form
+                            fire('.play-button');
+                            fire('#welcome-play-form .play-button, #play');
+                            fire('li[data-id], li[data-server], .server-item, .sources-button');
                             fire('#bigPlay');
                             fire('.jw-icon-display, .jw-display-icon-container, .jw-bigplay');
                             fire('.vjs-big-play-button, .play-btn, .play-button');
@@ -388,6 +393,7 @@ class SuperembedProvider : MainAPI() {
                     """.trimIndent()
 
                     var taps = 0
+                    var tapLoops = 0
                     fun tap() {
                         if (finished) return
                         if (isChallengePassed) {
@@ -398,11 +404,11 @@ class SuperembedProvider : MainAPI() {
                                 sendTouch(wv, w / 2f, h / 2f)
                             } catch (_: Exception) {}
                             
-                            // Chỉ click 15 lần, mỗi 2 giây = 30 giây
-                            if (taps < 15) {
+                            // Click tối đa 40 lần, mỗi 2 giây = 80 giây
+                            if (taps < 40) {
                                 handler.postDelayed({ tap() }, 2000)
                             } else {
-                                ClipboardLogger.logAndCopy("Tap", "Đã click 15 lần, chờ thêm 10 giây cuối...")
+                                ClipboardLogger.logAndCopy("Tap", "Đã click 40 lần, chờ thêm 10 giây cuối...")
                                 handler.postDelayed({ finish(null) }, 10_000L)
                             }
                         } else {
@@ -465,6 +471,7 @@ class SuperembedProvider : MainAPI() {
 
                         override fun onPageFinished(view: WebView?, url: String?) {
                             wv.evaluateJavascript(antiBotJs, null)
+                            seen.add("PAGE: " + (url ?: "").take(160))
                             
                             if (url?.contains("challenges.cloudflare.com") == true || 
                                 url?.contains("turnstile") == true) {
@@ -475,7 +482,10 @@ class SuperembedProvider : MainAPI() {
                                     ClipboardLogger.logAndCopy("Cloudflare", "Đã vượt qua! Bắt đầu...")
                                     isChallengePassed = true
                                 }
-                                handler.postDelayed({ tap() }, 1500)
+                                if (tapLoops == 0) {
+                                    tapLoops++
+                                    handler.postDelayed({ tap() }, 1500)
+                                }
                             }
                         }
 
@@ -569,7 +579,7 @@ class SuperembedProvider : MainAPI() {
             val result = sniffStream(embedUrl, fakeReferer, ua, seen)
 
             if (result == null) {
-                ClipboardLogger.logAndCopy("Error", "WebView không bắt được link stream.\nSeen cuối: ${seen.takeLast(5).joinToString("\n")}")
+                ClipboardLogger.logAndCopy("Error", "WebView không bắt được link stream.\nSeen cuối:\n${seen.filter { !it.startsWith("BLOCKED") }.takeLast(30).joinToString("\n")}")
                 return false
             }
 
