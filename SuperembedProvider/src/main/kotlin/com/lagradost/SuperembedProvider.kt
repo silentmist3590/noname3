@@ -10,6 +10,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.os.Message
 import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
@@ -228,7 +229,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // WEBVIEW SNIFFER (TÍCH HỢP VƯỢT CLOUDFLARE)
+    // WEBVIEW SNIFFER (XỬ LÝ ĐA POPUP BẰNG JS OVERRIDE)
     // =====================================================================================
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun sniffStream(
@@ -280,24 +281,50 @@ class SuperembedProvider : MainAPI() {
                         mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                     }
 
-                    // Chặn popup quảng cáo
+                    // Native Backup cho Popup
                     wv.webChromeClient = object : WebChromeClient() {
                         override fun onCreateWindow(
                             view: WebView?,
                             isDialog: Boolean,
                             isUserGesture: Boolean,
-                            resultMsg: android.os.Message?
-                        ): Boolean = false
+                            resultMsg: Message?
+                        ): Boolean {
+                            try {
+                                val popup = WebView(ctx)
+                                popup.settings.javaScriptEnabled = true
+                                val transport = resultMsg?.obj as? WebView.WebViewTransport
+                                transport?.webView = popup
+                                resultMsg?.sendToTarget()
+                                // Đóng ngay lập tức để dọn dẹp
+                                handler.postDelayed({ try { popup.destroy() } catch (_: Exception) {} }, 100)
+                                return true
+                            } catch (e: Exception) {
+                                return false
+                            }
+                        }
                     }
 
-                    // Script chống bot mạnh mẽ (đánh lừa Cloudflare)
+                    // ⭐ SCRIPT ĐA POPUP: Đè window.open để trả về cửa sổ ảo
                     val antiBotJs = """
                         (function() {
                             Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
                             Object.defineProperty(navigator, 'languages', {get: () => ['vi-VN', 'vi', 'en']});
                             Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
                             window.chrome = { runtime: {} };
-                            window.open = function() { return { closed: false, focus: function(){}, close: function(){}, blur: function(){} }; };
+                            
+                            // ⭐ ĐÈ WINDOW.OPEN ĐỂ XỬ LÝ ĐA POPUP
+                            window.open = function(url, name, specs) {
+                                console.log("Fake popup opened for: " + url);
+                                // Trả về một object giả lập cửa sổ
+                                return {
+                                    closed: false,
+                                    focus: function() {},
+                                    close: function() {},
+                                    blur: function() {},
+                                    location: { href: url || 'about:blank' },
+                                    document: { write: function(){}, location: { href: url || 'about:blank' } }
+                                };
+                            };
                         })();
                     """.trimIndent()
 
@@ -333,34 +360,31 @@ class SuperembedProvider : MainAPI() {
                     var taps = 0
                     fun tap() {
                         if (finished) return
-                        // Chỉ click khi đã vượt qua Cloudflare
                         if (isChallengePassed) {
                             taps++
                             try {
+                                // Chạy script click và fake popup
                                 wv.evaluateJavascript(antiBotJs + clickJs, null)
-                                val t = SystemClock.uptimeMillis()
-                                val d = MotionEvent.obtain(t, t, MotionEvent.ACTION_DOWN, w / 2f, h / 2f, 0)
-                                val u = MotionEvent.obtain(t, t + 60, MotionEvent.ACTION_UP, w / 2f, h / 2f, 0)
-                                wv.dispatchTouchEvent(d)
-                                wv.dispatchTouchEvent(u)
-                                d.recycle(); u.recycle()
+                                
+                                // Gửi chạm vào 3 vị trí khác nhau để đảm bảo trúng nút Play
+                                sendTouch(wv, w / 2f, h / 2f)
+                                sendTouch(wv, w / 2f, h * 0.7f)
+                                sendTouch(wv, w * 0.2f, h * 0.3f)
+                                
                             } catch (_: Exception) {}
-                            if (taps < 40) handler.postDelayed({ tap() }, 1500)
+                            // Click 60 lần, mỗi 1.5s (tương đương 1.5 phút) để vượt 3-4 popup
+                            if (taps < 60) handler.postDelayed({ tap() }, 1500)
                         } else {
-                            // Vẫn đang trong quá trình xác thực, kiểm tra lại sau
-                            handler.postDelayed({ tap() }, 1500)
+                            handler.postDelayed({ tap() }, 1000)
                         }
                     }
 
                     wv.webViewClient = object : WebViewClient() {
                         override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                            // Chạy script chống bot ngay khi trang bắt đầu tải
                             wv.evaluateJavascript(antiBotJs, null)
-                            
-                            // Phát hiện nếu đây là trang thử thách của Cloudflare
                             if (url?.contains("challenges.cloudflare.com") == true || 
                                 url?.contains("turnstile") == true) {
-                                ClipboardLogger.logAndCopy("Cloudflare", "Phát hiện thử thách, đang chờ xử lý...")
+                                ClipboardLogger.logAndCopy("Cloudflare", "Phát hiện thử thách...")
                                 isChallengePassed = false
                             }
                         }
@@ -400,22 +424,14 @@ class SuperembedProvider : MainAPI() {
                         override fun onPageFinished(view: WebView?, url: String?) {
                             wv.evaluateJavascript(antiBotJs, null)
                             
-                            // Phân biệt giữa trang thử thách và trang player thực sự
                             if (url?.contains("challenges.cloudflare.com") == true || 
                                 url?.contains("turnstile") == true) {
-                                ClipboardLogger.logAndCopy("Cloudflare", "Vẫn đang trong thử thách, chờ thêm...")
+                                ClipboardLogger.logAndCopy("Cloudflare", "Đang trong thử thách...")
                                 isChallengePassed = false
-                                // Thử chạm vào checkbox "Verify you are human" (nếu có)
-                                val t = SystemClock.uptimeMillis()
-                                val d = MotionEvent.obtain(t, t, MotionEvent.ACTION_DOWN, w / 2f, h / 2f, 0)
-                                val u = MotionEvent.obtain(t, t + 60, MotionEvent.ACTION_UP, w / 2f, h / 2f, 0)
-                                wv.dispatchTouchEvent(d)
-                                wv.dispatchTouchEvent(u)
-                                d.recycle(); u.recycle()
+                                sendTouch(wv, w / 2f, h / 2f)
                             } else {
-                                // Đã vượt qua Cloudflare và đang ở trang player
                                 if (!isChallengePassed) {
-                                    ClipboardLogger.logAndCopy("Cloudflare", "Đã vượt qua thử thách! Bắt đầu tìm link...")
+                                    ClipboardLogger.logAndCopy("Cloudflare", "Đã vượt qua! Bắt đầu tìm link...")
                                     isChallengePassed = true
                                 }
                                 handler.postDelayed({ tap() }, 800)
@@ -446,10 +462,7 @@ class SuperembedProvider : MainAPI() {
                         CommonActivity.activity?.addContentView(wv, ViewGroup.LayoutParams(w, h))
                     } catch (_: Exception) {}
 
-                    // Timeout tổng 180 giây
                     handler.postDelayed({ finish(null) }, 180_000L)
-
-                    // Tải trang với User-Agent
                     wv.loadUrl(pageUrl, mapOf("Referer" to referer))
 
                 } catch (e: Exception) {
@@ -458,6 +471,17 @@ class SuperembedProvider : MainAPI() {
                 }
             }
         }
+    }
+
+    private fun sendTouch(wv: WebView, x: Float, y: Float) {
+        try {
+            val t = SystemClock.uptimeMillis()
+            val d = MotionEvent.obtain(t, t, MotionEvent.ACTION_DOWN, x, y, 0)
+            val u = MotionEvent.obtain(t, t + 60, MotionEvent.ACTION_UP, x, y, 0)
+            wv.dispatchTouchEvent(d)
+            wv.dispatchTouchEvent(u)
+            d.recycle(); u.recycle()
+        } catch (_: Exception) {}
     }
 
     // =====================================================================================
