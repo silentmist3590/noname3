@@ -538,6 +538,102 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
+    // Cloudflare chặn app.get tới playvideo.php (403) nên mở từng link bằng WebView (đã qua captcha, có cookie)
+    // và ghi lại: trang chuyển hướng tới đâu (REDIRECT) hoặc nội dung HTML (HTML).
+    // =====================================================================================
+    @SuppressLint("SetJavaScriptEnabled")
+    private suspend fun resolveServers(urls: List<String>, referer: String, results: MutableList<Triple<String, String, String>>) {
+        suspendCoroutine<Unit> { cont ->
+            val handler = Handler(Looper.getMainLooper())
+            handler.post {
+                val ctx: Context? = CommonActivity.activity
+                if (ctx == null) {
+                    ClipboardLogger.logAndCopy("Resolve Error", "Không có Context")
+                    cont.resume(Unit)
+                    return@post
+                }
+                try {
+                    val wv = WebView(ctx)
+                    var finished = false
+                    var idx = -1
+                    var got = false
+                    var cur = ""
+                    fun end() {
+                        if (finished) return
+                        finished = true
+                        handler.removeCallbacksAndMessages(null)
+                        try {
+                            wv.stopLoading()
+                            (wv.parent as? ViewGroup)?.removeView(wv)
+                            wv.destroy()
+                        } catch (_: Exception) {}
+                        cont.resume(Unit)
+                    }
+                    fun next() {
+                        if (finished) return
+                        idx++
+                        got = false
+                        if (idx >= urls.size) { end(); return }
+                        cur = urls[idx]
+                        val my = idx
+                        wv.loadUrl(cur, mapOf("Referer" to referer))
+                        handler.postDelayed({
+                            if (!finished && idx == my && !got) {
+                                got = true
+                                results.add(Triple(urls[my], "TIMEOUT", ""))
+                                next()
+                            }
+                        }, 9000L)
+                    }
+                    wv.settings.apply {
+                        javaScriptEnabled = true
+                        domStorageEnabled = true
+                        mediaPlaybackRequiresUserGesture = false
+                        mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                    }
+                    wv.webViewClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                            val u = request?.url?.toString() ?: return false
+                            if (!u.contains("streamingnow.mov") && !got && cur.isNotEmpty()) {
+                                got = true
+                                results.add(Triple(cur, "REDIRECT", u))
+                                handler.post { next() }
+                                return true
+                            }
+                            return false
+                        }
+
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            if (got || url == null || !url.contains("playvideo.php")) return
+                            view?.evaluateJavascript("(function(){return document.documentElement.outerHTML;})()") { raw ->
+                                if (got) return@evaluateJavascript
+                                got = true
+                                val html = try { org.json.JSONArray("[" + (raw ?: "\"\"") + "]").optString(0) } catch (_: Exception) { raw ?: "" }
+                                results.add(Triple(cur, "HTML", html))
+                                next()
+                            }
+                        }
+                    }
+                    wv.measure(
+                        View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY)
+                    )
+                    wv.layout(0, 0, 1080, 1920)
+                    wv.translationX = -4000f
+                    try {
+                        CommonActivity.activity?.addContentView(wv, ViewGroup.LayoutParams(1080, 1920))
+                    } catch (_: Exception) {}
+                    handler.postDelayed({ end() }, 100_000L)
+                    next()
+                } catch (e: Exception) {
+                    ClipboardLogger.logAndCopy("Resolve Exception", e.stackTraceToString().take(600))
+                    cont.resume(Unit)
+                }
+            }
+        }
+    }
+
+    // =====================================================================================
     // Lấy link từ danh sách server (playvideo.php?video_id=..&server_id=..&token=..)
     // =====================================================================================
     private suspend fun extractFromServers(
@@ -548,50 +644,41 @@ class SuperembedProvider : MainAPI() {
         val playerReferer = "https://streamingnow.mov/"
         var count = 0
         val counting: (ExtractorLink) -> Unit = { count++; callback(it) }
-        val skipHosts = listOf("streamingnow.mov", "multiembed.mov", "cloudflare", "histats", "google", "cloudfront", "facebook", "twitter")
+        val skipHosts = listOf("streamingnow.mov", "multiembed.mov", "cloudflare", "histats", "google", "cloudfront", "facebook", "twitter", "w3.org")
         val done = HashSet<String>()
-        ClipboardLogger.logAndCopy("Servers", "Tìm thấy ${urls.size} server (playvideo.php)")
-        for (u in urls.distinct().take(20)) {
-            try {
-                val cookie = CookieManager.getInstance().getCookie(u) ?: ""
-                val headers = mutableMapOf(
-                    "User-Agent" to (wvUa.ifEmpty { "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36" }),
-                    "Referer" to playerReferer,
-                    "X-Requested-With" to "XMLHttpRequest"
-                )
-                if (cookie.isNotEmpty()) headers["Cookie"] = cookie
-                val r = app.get(u, headers = headers, timeout = 25)
-                val body = r.text
-                val sid = Regex("server_id=(\\d+)").find(u)?.groupValues?.get(1) ?: "?"
-                ClipboardLogger.logAndCopy("Server $sid", "code=${r.code} final=${r.url.take(120)}\n${body.take(400)}")
-                val cands = mutableListOf<String>()
-                if (!skipHosts.any { r.url.contains(it, true) }) cands.add(r.url)
+        val list = urls.distinct().take(14)
+        ClipboardLogger.logAndCopy("Servers", "Tìm thấy ${urls.size} server (playvideo.php), mở ${list.size} bằng WebView")
+        val results = mutableListOf<Triple<String, String, String>>()
+        resolveServers(list, playerReferer, results)
+        for ((u, kind, payload) in results) {
+            val sid = Regex("server_id=(\\d+)").find(u)?.groupValues?.get(1) ?: "?"
+            ClipboardLogger.logAndCopy("Server $sid", "$kind ${payload.take(300)}")
+            val cands = mutableListOf<String>()
+            if (kind == "REDIRECT") cands.add(payload)
+            if (kind == "HTML") {
                 Regex("""(?:src|href|file|url|location(?:\.href)?)\s*[=:]\s*["'](https?:[^"']+)["']""", RegexOption.IGNORE_CASE)
-                    .findAll(body).forEach { cands.add(it.groupValues[1].replace("\\/", "/")) }
-                Regex("""https?:\\?/\\?/[^\s"'<>\\]+""").findAll(body).forEach { cands.add(it.value.replace("\\/", "/")) }
-                for (c in cands.distinct()) {
-                    if (skipHosts.any { c.contains(it, true) } || AD_DOMAINS.any { c.contains(it, true) }) continue
-                    if (!done.add(c)) continue
-                    try {
-                        if (c.contains(".m3u8", true)) {
-                            counting(newExtractorLink(this.name, "MultiEmbed $sid", c, ExtractorLinkType.M3U8) {
-                                this.referer = playerReferer
-                                this.quality = Qualities.Unknown.value
-                                this.headers = mapOf("User-Agent" to (headers["User-Agent"] ?: ""), "Referer" to playerReferer)
-                            })
-                        } else {
-                            val before = count
-                            loadExtractor(c, playerReferer, subtitleCallback, counting)
-                            ClipboardLogger.logAndCopy("Extractor $sid", "$c -> ${count - before} link")
-                        }
-                    } catch (e: Exception) {
-                        if (e is java.util.concurrent.CancellationException) throw e
-                        ClipboardLogger.logAndCopy("Extractor Error $sid", "$c: ${e.message}")
+                    .findAll(payload).forEach { cands.add(it.groupValues[1].replace("\\/", "/")) }
+                Regex("""https?:\\?/\\?/[^\s"'<>\\]+""").findAll(payload).forEach { cands.add(it.value.replace("\\/", "/")) }
+            }
+            for (c in cands.distinct()) {
+                if (skipHosts.any { c.contains(it, true) } || AD_DOMAINS.any { c.contains(it, true) }) continue
+                if (!done.add(c)) continue
+                try {
+                    if (c.contains(".m3u8", true)) {
+                        counting(newExtractorLink(this.name, "MultiEmbed $sid", c, ExtractorLinkType.M3U8) {
+                            this.referer = playerReferer
+                            this.quality = Qualities.Unknown.value
+                            this.headers = mapOf("Referer" to playerReferer)
+                        })
+                    } else {
+                        val before = count
+                        loadExtractor(c, playerReferer, subtitleCallback, counting)
+                        ClipboardLogger.logAndCopy("Extractor $sid", "$c -> ${count - before} link")
                     }
+                } catch (e: Exception) {
+                    if (e is java.util.concurrent.CancellationException) throw e
+                    ClipboardLogger.logAndCopy("Extractor Error $sid", "$c: ${e.message}")
                 }
-            } catch (e: Exception) {
-                if (e is java.util.concurrent.CancellationException) throw e
-                ClipboardLogger.logAndCopy("Server Error", e.message ?: "")
             }
         }
         return count > 0
