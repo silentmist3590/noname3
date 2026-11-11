@@ -46,6 +46,7 @@ private fun parseRef(s: String): Ref? {
 
 private data class SniffResult(val url: String, val headers: Map<String, String>)
 
+// Danh sách đen các domain quảng cáo (từ log thực tế của bạn)
 private val AD_DOMAINS = listOf(
     "doubleclick.net", "googlesyndication.com", "googleadservices.com",
     "popads.net", "onclickads.net", "propellerads.com", "popcash.net",
@@ -227,7 +228,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // WEBVIEW SNIFFER (Cơ chế Vidscmov + Cookie)
+    // WEBVIEW SNIFFER (CƠ CHẾ DUY NHẤT - TẬP TRUNG VÀO PLAY & BẮT LINK)
     // =====================================================================================
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun sniffStream(pageUrl: String, referer: String, ua: String, seen: MutableList<String>): SniffResult? {
@@ -278,7 +279,7 @@ class SuperembedProvider : MainAPI() {
                         override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: android.os.Message?): Boolean = false
                     }
 
-                    // Script Vidscmov: Fake popup và ép video phát
+                    // Script tối giản: Fake popup, click Play, ép video autoplay
                     val fakePopup = "try{window.open=function(){return {closed:false,focus:function(){},close:function(){},blur:function(){}}};}catch(e){}"
                     val clickJs = "(function(){function fire(el){if(!el)return;try{el.click();}catch(e){}}" +
                         "fire(document.getElementById('bigPlay'));" +
@@ -291,7 +292,7 @@ class SuperembedProvider : MainAPI() {
                         taps++
                         try {
                             wv.evaluateJavascript(fakePopup + clickJs, null)
-                            // Chạm vào giữa màn hình để đánh lừa iframe
+                            // Chạm vào giữa màn hình để đánh lừa iframe (nếu có)
                             val t = SystemClock.uptimeMillis()
                             val d = MotionEvent.obtain(t, t, MotionEvent.ACTION_DOWN, w / 2f, h / 2f, 0)
                             val u = MotionEvent.obtain(t, t + 60, MotionEvent.ACTION_UP, w / 2f, h / 2f, 0)
@@ -299,8 +300,8 @@ class SuperembedProvider : MainAPI() {
                             wv.dispatchTouchEvent(u)
                             d.recycle(); u.recycle()
                         } catch (_: Exception) {}
-                        // Lặp lại 30 lần (khoảng 45 giây)
-                        if (taps < 30) handler.postDelayed({ tap() }, 1500)
+                        // Giảm số lần click xuống còn 25 lần (khoảng 40 giây), tránh treo WebView
+                        if (taps < 25) handler.postDelayed({ tap() }, 1500)
                     }
 
                     wv.webViewClient = object : WebViewClient() {
@@ -387,49 +388,14 @@ class SuperembedProvider : MainAPI() {
         }
 
         try {
-            // 1. THỬ DIRECT API
-            val directUrl = if (type == "movie") {
-                "$BASE_URL/directstream.php?video_id=$tmdbId&tmdb=1"
-            } else {
-                "$BASE_URL/directstream.php?video_id=$tmdbId&tmdb=1&s=$season&e=$episode"
-            }
-
-            ClipboardLogger.logAndCopy("Direct API", "Thử: $directUrl")
-            val directRes = app.get(directUrl, headers = mapOf("User-Agent" to ua, "Referer" to fakeReferer)).text
-            val directM3u8 = Regex("""https?://[^"'\\\s]+\.m3u8[^"'\\\s]*""", RegexOption.IGNORE_CASE)
-                .find(directRes)?.value
-
-            if (directM3u8 != null) {
-                ClipboardLogger.logAndCopy("Direct Success", "Tìm thấy M3U8: $directM3u8")
-                val m3u8Headers = mapOf(
-                    "User-Agent" to ua,
-                    "Referer" to "https://streamingnow.mov/",
-                    "Origin" to "https://streamingnow.mov"
-                )
-                val qualities = M3u8Helper.generateM3u8(
-                    source = this.name,
-                    streamUrl = directM3u8,
-                    referer = "https://streamingnow.mov/",
-                    headers = m3u8Headers
-                )
-                if (qualities.isNotEmpty()) {
-                    qualities.forEach { callback.invoke(it) }
-                } else {
-                    callback.invoke(newExtractorLink(this.name, "MultiEmbed Direct", directM3u8, ExtractorLinkType.M3U8) {
-                        this.referer = "https://streamingnow.mov/"; this.quality = Qualities.P1080.value; this.headers = m3u8Headers
-                    })
-                }
-                return true
-            }
-
-            // 2. DÙNG WEBVIEW (CƠ CHẾ VIDSCMOV)
+            // CHỈ DÙNG WEBVIEW, KHÔNG GỌI DIRECT API NỮA
             val embedUrl = if (type == "movie") {
                 "$BASE_URL/?video_id=$tmdbId&tmdb=1"
             } else {
                 "$BASE_URL/?video_id=$tmdbId&tmdb=1&s=$season&e=$episode"
             }
 
-            ClipboardLogger.logAndCopy("Fallback WebView", "Tải WebView: $embedUrl")
+            ClipboardLogger.logAndCopy("WebView", "Tải: $embedUrl")
             val seen = mutableListOf<String>()
             val result = sniffStream(embedUrl, fakeReferer, ua, seen)
 
@@ -438,7 +404,7 @@ class SuperembedProvider : MainAPI() {
                 return false
             }
 
-            // ⭐ LẤY COOKIE VÀ GỘP HEADERS
+            // LẤY COOKIE VÀ GỘP HEADERS (Để vượt 403 Forbidden)
             val playerReferer = "https://streamingnow.mov/"
             val cookie = CookieManager.getInstance().getCookie(result.url) ?: ""
             
