@@ -4,7 +4,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import com.lagradost.cloudstream3.utils.M3u8Helper // ⭐ Thêm import M3u8Helper
+import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.utils.Qualities
 import android.annotation.SuppressLint
 import android.content.Context
@@ -14,7 +14,6 @@ import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
-import android.webkit.CookieManager // ⭐ Thêm import CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -35,6 +34,7 @@ private const val TMDB_BASE_URL = "https://tmdb-proxy.silentmist3590.workers.dev
 private const val TMDB_API_KEY = "c3d997893bf55c01f39f821b53781547"
 private const val IMG_PROXY = "https://wsrv.nl/?url="
 
+// ⭐ Regex linh hoạt: Tự động bóc tách ID ngay cả khi CloudStream ghép thêm URL phía trước
 private val ID_REGEX = Regex("""(movie|tv):(\d+)(?::(\d+):(\d+))?""")
 private class Ref(val type: String, val id: Int, val season: Int?, val episode: Int?)
 
@@ -53,8 +53,7 @@ private val AD_DOMAINS = listOf(
     "adexchangerapid.com", "googletagmanager.com", "googletagservices.com",
     "crwdcntrl.net", "tynt.com", "mrktmtrcs.net", "dtscout.com", "onaudience.com",
     "histats.com", "luugy.com", "llvpn.com", "rtmark.net", "dvzcfqpdoaxtr.website",
-    "adsco.re", "ntwkbc21.com", "ntwkbc42.com", "usrpubtrck.com", "cdn4ads.com",
-    "ddyejopzyjxxzf.com" // ⭐ Thêm từ log của bạn
+    "adsco.re", "ntwkbc21.com", "ntwkbc42.com", "usrpubtrck.com", "cdn4ads.com"
 )
 
 // =====================================================================================
@@ -228,7 +227,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // WEBVIEW SNIFFER
+    // WEBVIEW SNIFFER (DỰ PHÒNG)
     // =====================================================================================
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun sniffStream(pageUrl: String, referer: String, ua: String, seen: MutableList<String>): SniffResult? {
@@ -388,7 +387,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // LOAD LINKS (Xử lý IP-lock và Cookie)
+    // LOAD LINKS
     // =====================================================================================
     override suspend fun loadLinks(
         data: String,
@@ -412,29 +411,72 @@ class SuperembedProvider : MainAPI() {
 
         val ua = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
         val fakeReferer = "https://multiembed.mov/"
-
-        val imdbId = imdbCache[tmdbId] ?: ""
         
-        val embedUrl = if (type == "movie") {
-            if (imdbId.isNotEmpty()) {
-                "$BASE_URL/?video_id=$imdbId"
-            } else {
-                "$BASE_URL/?video_id=$tmdbId&tmdb=1"
-            }
-        } else {
-            if (imdbId.isNotEmpty()) {
-                "$BASE_URL/?video_id=$imdbId&s=$season&e=$episode"
-            } else {
-                "$BASE_URL/?video_id=$tmdbId&tmdb=1&s=$season&e=$episode"
-            }
-        }
+        // Ưu tiên lấy IMDb ID
+        val imdbId = imdbCache[tmdbId] ?: ""
+        val queryId = if (imdbId.isNotEmpty()) imdbId else tmdbId.toString()
+        val tmdbParam = if (imdbId.isEmpty()) "&tmdb=1" else ""
 
         try {
             if (imdbId.isNotEmpty()) {
                 ApiServices.fetchSubtitles(imdbId, subtitleCallback)
             }
 
-            ClipboardLogger.logAndCopy("Embed URL", embedUrl)
+            // ⭐ BƯỚC 1: THỬ NGHIỆM DIRECTSTREAM API (LẤY LINK TRỰC TIẾP)
+            val directUrl = if (type == "movie") {
+                "$BASE_URL/directstream.php?video_id=$queryId$tmdbParam"
+            } else {
+                "$BASE_URL/directstream.php?video_id=$queryId$tmdbParam&s=$season&e=$episode"
+            }
+
+            ClipboardLogger.logAndCopy("Direct API", "Thử direct API: $directUrl")
+            
+            try {
+                val directRes = app.get(directUrl, headers = mapOf("User-Agent" to ua, "Referer" to fakeReferer)).text
+                val directM3u8 = Regex("""https?://[^"'\\\s]+\.m3u8[^"'\\\s]*""", RegexOption.IGNORE_CASE)
+                    .find(directRes)?.value
+
+                if (directM3u8 != null) {
+                    ClipboardLogger.logAndCopy("Direct Success", "Tìm thấy M3U8 qua direct API: $directM3u8")
+                    
+                    val m3u8Headers = mapOf(
+                        "User-Agent" to ua,
+                        "Referer" to "https://streamingnow.mov/",
+                        "Origin" to "https://streamingnow.mov"
+                    )
+
+                    val qualities = M3u8Helper.generateM3u8(
+                        source = this.name,
+                        streamUrl = directM3u8,
+                        referer = "https://streamingnow.mov/",
+                        headers = m3u8Headers
+                    )
+
+                    if (qualities.isNotEmpty()) {
+                        qualities.forEach { callback.invoke(it) }
+                    } else {
+                        callback.invoke(
+                            newExtractorLink(this.name, "MultiEmbed Direct", directM3u8, ExtractorLinkType.M3U8) {
+                                this.referer = "https://streamingnow.mov/"
+                                this.quality = Qualities.P1080.value
+                                this.headers = m3u8Headers
+                            }
+                        )
+                    }
+                    return true
+                }
+            } catch (e: Exception) {
+                ClipboardLogger.logAndCopy("Direct API Error", e.message ?: "Unknown")
+            }
+
+            // ⭐ BƯỚC 2: DÙNG WEBVIEW LÀM PHƯƠNG ÁN DỰ PHÒNG
+            val embedUrl = if (type == "movie") {
+                "$BASE_URL/?video_id=$queryId$tmdbParam"
+            } else {
+                "$BASE_URL/?video_id=$queryId$tmdbParam&s=$season&e=$episode"
+            }
+
+            ClipboardLogger.logAndCopy("Fallback WebView", "Tải WebView: $embedUrl")
             val seen = mutableListOf<String>()
             val result = sniffStream(embedUrl, fakeReferer, ua, seen)
 
@@ -443,56 +485,32 @@ class SuperembedProvider : MainAPI() {
                 return false
             }
 
-            val m3u8Url = result.url
             val playerReferer = "https://streamingnow.mov/"
-
-            // ⭐ LẤY COOKIE TỪ WEBVIEW
-            val cookie = CookieManager.getInstance().getCookie(m3u8Url) ?: ""
-            
-            val finalHeaders = mutableMapOf(
-                "User-Agent" to ua,
-                "Referer" to playerReferer,
-                "Origin" to "https://streamingnow.mov"
-            )
-            if (cookie.isNotEmpty()) {
-                finalHeaders["Cookie"] = cookie
-                ClipboardLogger.logAndCopy("Cookie", "Đã lấy được Cookie: ${cookie.take(50)}...")
-            }
-            
-            // Gộp thêm các header khác từ request gốc của WebView
-            result.headers.forEach { (k, v) ->
-                if (!finalHeaders.containsKey(k)) finalHeaders[k] = v
+            val finalHeaders = result.headers.toMutableMap().apply {
+                put("User-Agent", ua)
+                put("Referer", playerReferer)
+                put("Origin", "https://streamingnow.mov")
             }
 
-            // ⭐ DÙNG M3U8HELPER ĐỂ KIỂM TRA VÀ TÁCH CHẤT LƯỢNG
             val qualities = M3u8Helper.generateM3u8(
                 source = this.name,
-                streamUrl = m3u8Url,
+                streamUrl = result.url,
                 referer = playerReferer,
                 headers = finalHeaders
             )
 
             if (qualities.isNotEmpty()) {
-                ClipboardLogger.logAndCopy("Success", "M3u8Helper đã tách được ${qualities.size} chất lượng.")
                 qualities.forEach { callback.invoke(it) }
-                return true
             } else {
-                // Nếu M3u8Helper thất bại (thường do 403), ta vẫn cố phát link thô như một fallback
-                ClipboardLogger.logAndCopy("M3u8Helper Failed", "Không thể tải playlist, có thể do sai header hoặc link hết hạn. Thử phát link thô.")
                 callback.invoke(
-                    newExtractorLink(
-                        source = this.name,
-                        name = "MultiEmbed",
-                        url = m3u8Url,
-                        type = ExtractorLinkType.M3U8
-                    ) {
+                    newExtractorLink(this.name, "MultiEmbed", result.url, ExtractorLinkType.M3U8) {
                         this.referer = playerReferer
                         this.quality = Qualities.P1080.value
                         this.headers = finalHeaders
                     }
                 )
-                return true
             }
+            return true
 
         } catch (e: Exception) {
             if (e is java.util.concurrent.CancellationException) throw e
