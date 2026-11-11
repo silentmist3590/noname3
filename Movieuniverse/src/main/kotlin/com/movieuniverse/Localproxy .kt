@@ -1,13 +1,12 @@
 package com.movieuniverse
 
+import com.lagradost.cloudstream3.app
 import java.io.BufferedReader
 import java.io.InputStreamReader
-import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URI
-import java.net.URL
 import java.net.URLDecoder
 import java.net.URLEncoder
 
@@ -82,20 +81,28 @@ object LocalProxy {
         return -1
     }
 
+    private class R(val code: Int, val ct: String, val url: String, val bytes: ByteArray)
+
+    /** Tải bằng chính OkHttp của CloudStream (cùng kiểu kết nối với app.get, site không chặn như HttpURLConnection). */
+    private fun fetch(url: String, headers: Map<String, String>): R {
+        val rb = okhttp3.Request.Builder().url(url)
+        headers.forEach { (k, v) -> rb.header(k, v) }
+        app.baseClient.newCall(rb.build()).execute().use { r ->
+            return R(r.code, r.header("Content-Type") ?: "application/octet-stream", r.request.url.toString(), r.body?.bytes() ?: ByteArray(0))
+        }
+    }
+
     private fun mint(p: Map<String, String>): String? {
         val origin = p["o"] ?: return null
         for (attempt in 0..1) {
             try {
                 val u = "$origin/api.php?a=play&ref=${enc(p["ref"] ?: "")}&t=${enc(p["t"] ?: "")}" + (if (attempt > 0) "&fresh=1" else "")
-                val c = URL(u).openConnection() as HttpURLConnection
-                c.connectTimeout = 20_000; c.readTimeout = 30_000
-                c.setRequestProperty("User-Agent", ua)
-                c.setRequestProperty("Referer", p["e"] ?: "$origin/")
-                c.setRequestProperty("Accept", "application/json, */*")
-                val body = (if (c.responseCode >= 400) c.errorStream else c.inputStream)?.readBytes()?.toString(Charsets.UTF_8).orEmpty()
+                val r = fetch(u, mapOf("User-Agent" to ua, "Referer" to (p["e"] ?: "$origin/"), "Accept" to "application/json, */*"))
+                val body = String(r.bytes, Charsets.UTF_8)
                 val m = Regex("\"url\"\\s*:\\s*\"([^\"]+)\"").find(body)
                 if (m != null) return abs(p["e"] ?: origin, m.groupValues[1].replace("\\/", "/"))
-                log("mint fail code=${c.responseCode} ${body.take(100)}")
+                log("mint fail code=${r.code} ${body.take(100)}")
+                if (r.code == 429) Thread.sleep(1500)
             } catch (e: Throwable) {
                 log("mint ERR ${e.message}")
             }
@@ -127,25 +134,18 @@ object LocalProxy {
                 out.flush()
                 return
             }
-            val conn = URL(target).openConnection() as HttpURLConnection
-            conn.connectTimeout = 20_000
-            conn.readTimeout = 40_000
-            conn.instanceFollowRedirects = true
-            conn.setRequestProperty("User-Agent", ua)
-            conn.setRequestProperty("Referer", referer)
-            conn.setRequestProperty("Accept-Encoding", "identity")
-            val code = conn.responseCode
-            val stream = if (code >= 400) conn.errorStream else conn.inputStream
-            val ct = conn.contentType ?: "application/octet-stream"
-            log("${if (isPlay) "play" else "get"}: code=$code ct=$ct len=${conn.contentLengthLong} url=${target.take(100)}")
-            if (code >= 400 || stream == null) {
+            val r = fetch(target, mapOf("User-Agent" to ua, "Referer" to referer))
+            val code = r.code
+            val ct = r.ct
+            log("${if (isPlay) "play" else "get"}: code=$code ct=$ct len=${r.bytes.size} url=${target.take(100)}")
+            if (code >= 400) {
                 out.write("HTTP/1.1 $code Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
                 out.flush()
                 return
             }
-            val finalUrl = conn.url.toString()
+            val finalUrl = r.url
             val isPl = raw.startsWith("/p.m3u8") || isPlay
-            val bytes = stream.readBytes()
+            val bytes = r.bytes
             if (isPl) {
                 val txt = String(bytes, Charsets.UTF_8)
                 val body = if (txt.trimStart().startsWith("#EXTM3U")) rewrite(txt, finalUrl).toByteArray() else bytes
