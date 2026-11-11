@@ -282,7 +282,7 @@ class SuperembedProvider : MainAPI() {
                         mediaPlaybackRequiresUserGesture = false
                         javaScriptCanOpenWindowsAutomatically = true
                         setSupportMultipleWindows(true)
-                        userAgentString = ua
+                        // KHÔNG đặt userAgentString: UA giả lệch với client-hints làm Cloudflare Turnstile từ chối
                         mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                     }
 
@@ -332,19 +332,8 @@ class SuperembedProvider : MainAPI() {
                         }
                     }
 
-                    val antiBotJs = """
-                        (function() {
-                            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                            Object.defineProperty(navigator, 'languages', {get: () => ['vi-VN', 'vi', 'en']});
-                            Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
-                            window.chrome = { runtime: {} };
-                            
-                            try {
-                                window.location.assign = function() {};
-                                window.location.replace = function() {};
-                            } catch(e) {}
-                        })();
-                    """.trimIndent()
+                    // Tắt giả mạo navigator/location: Turnstile phát hiện được và trả "Verification failed"
+                    val antiBotJs = ""
 
                     // Script click đơn giản hơn - chỉ click video và nút play
                     val clickJs = """
