@@ -452,7 +452,7 @@ class MovieuniverseProvider : MainAPI() {
                                             val rr = app.get("$eOrigin/api.php?a=play&ref=" + URLEncoder.encode(ref, "UTF-8") + "&t=" + URLEncoder.encode(t, "UTF-8") + "&fresh=1", headers = eh, cookies = ck, timeout = 30)
                                             JSONObject(rr.text).optString("url").replace("\\/", "/").takeIf { it.isNotBlank() }?.let { absUrl(embed, it) }
                                         } catch (_: Throwable) { null }
-                                    }, if (proxyOk) LocalProxy.lazy(s.optString("k"), embed, eOrigin, "$mainUrl/") else null)
+                                    }, if (proxyOk) LocalProxy.lazy(s.optString("name"), i, embed, eOrigin, "$mainUrl/") else null)
                                     found = true
                                 }
                             }
