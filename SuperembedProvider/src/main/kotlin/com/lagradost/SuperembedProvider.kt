@@ -558,6 +558,8 @@ class SuperembedProvider : MainAPI() {
                     var idx = -1
                     var got = false
                     var cur = ""
+                    var armed = false
+                    val ext = mutableListOf<String>()
                     fun end() {
                         if (finished) return
                         finished = true
@@ -573,6 +575,8 @@ class SuperembedProvider : MainAPI() {
                         if (finished) return
                         idx++
                         got = false
+                        armed = false
+                        ext.clear()
                         if (idx >= urls.size) { end(); return }
                         cur = urls[idx]
                         val my = idx
@@ -603,15 +607,35 @@ class SuperembedProvider : MainAPI() {
                             return false
                         }
 
+                        override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                            val u = request?.url?.toString() ?: return null
+                            if (!got && !u.contains("streamingnow.mov") && !u.contains("cloudflare") && !u.contains("gstatic") &&
+                                !u.contains("googleapis") && AD_DOMAINS.none { u.contains(it, true) } && ext.size < 40) ext.add(u)
+                            return null
+                        }
+
                         override fun onPageFinished(view: WebView?, url: String?) {
-                            if (got || url == null || !url.contains("playvideo.php")) return
-                            view?.evaluateJavascript("(function(){return document.documentElement.outerHTML;})()") { raw ->
-                                if (got) return@evaluateJavascript
-                                got = true
-                                val html = try { org.json.JSONArray("[" + (raw ?: "\"\"") + "]").optString(0) } catch (_: Exception) { raw ?: "" }
-                                results.add(Triple(cur, "HTML", html))
-                                next()
-                            }
+                            if (got || armed || url == null || !url.contains("playvideo.php")) return
+                            armed = true
+                            val my = idx
+                            // Trang này lại có nút Play: bấm, đợi rồi thu HTML + mọi iframe/video/link
+                            handler.postDelayed({
+                                if (!finished && idx == my && !got) view?.evaluateJavascript(
+                                    "(function(){var b=document.querySelector('.play-button');if(b)b.click();var v=document.querySelector('video');if(v){v.muted=true;try{v.play();}catch(e){}}})()", null
+                                )
+                            }, 1200L)
+                            handler.postDelayed({
+                                if (finished || idx != my || got) return@postDelayed
+                                view?.evaluateJavascript(
+                                    "(function(){var r=[];document.querySelectorAll('iframe,video,source,a').forEach(function(e){var s=e.src||e.href||'';if(s)r.push(s)});return document.documentElement.outerHTML+'\\n@@LINKS@@\\n'+r.join('\\n');})()"
+                                ) { raw ->
+                                    if (got || idx != my) return@evaluateJavascript
+                                    got = true
+                                    val html = try { org.json.JSONArray("[" + (raw ?: "\"\"") + "]").optString(0) } catch (_: Exception) { raw ?: "" }
+                                    results.add(Triple(urls[my], "HTML", html + "\n@@EXT@@\n" + ext.joinToString("\n")))
+                                    next()
+                                }
+                            }, 6500L)
                         }
                     }
                     wv.measure(
@@ -623,7 +647,7 @@ class SuperembedProvider : MainAPI() {
                     try {
                         CommonActivity.activity?.addContentView(wv, ViewGroup.LayoutParams(1080, 1920))
                     } catch (_: Exception) {}
-                    handler.postDelayed({ end() }, 100_000L)
+                    handler.postDelayed({ end() }, 110_000L)
                     next()
                 } catch (e: Exception) {
                     ClipboardLogger.logAndCopy("Resolve Exception", e.stackTraceToString().take(600))
@@ -646,13 +670,14 @@ class SuperembedProvider : MainAPI() {
         val counting: (ExtractorLink) -> Unit = { count++; callback(it) }
         val skipHosts = listOf("streamingnow.mov", "multiembed.mov", "cloudflare", "histats", "google", "cloudfront", "facebook", "twitter", "w3.org")
         val done = HashSet<String>()
-        val list = urls.distinct().take(14)
+        val list = urls.distinct().take(8)
         ClipboardLogger.logAndCopy("Servers", "Tìm thấy ${urls.size} server (playvideo.php), mở ${list.size} bằng WebView")
         val results = mutableListOf<Triple<String, String, String>>()
         resolveServers(list, playerReferer, results)
         for ((u, kind, payload) in results) {
             val sid = Regex("server_id=(\\d+)").find(u)?.groupValues?.get(1) ?: "?"
-            ClipboardLogger.logAndCopy("Server $sid", "$kind ${payload.take(300)}")
+            val stripped = payload.replace(Regex("(?s)<style.*?</style>"), "").replace(Regex("(?s)<svg.*?</svg>"), "<svg/>").replace(Regex("\\s+"), " ")
+            ClipboardLogger.logAndCopy("Server $sid", "$kind ${if (results.firstOrNull()?.first == u) stripped.take(3500) else stripped.takeLast(700)}")
             val cands = mutableListOf<String>()
             if (kind == "REDIRECT") cands.add(payload)
             if (kind == "HTML") {
