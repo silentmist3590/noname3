@@ -11,7 +11,6 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
-import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
@@ -228,139 +227,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // PHƯƠNG THỨC CLICK CHUỘT THẬT (REAL MOUSE CLICK)
-    // =====================================================================================
-    private fun realMouseClick(wv: WebView, x: Float, y: Float, handler: Handler) {
-    val downTime = SystemClock.uptimeMillis()
-
-    // 1. HOVER_MOVE (di chuyển chuột đến tọa độ)
-    val hover = MotionEvent.obtain(
-        downTime, downTime,
-        MotionEvent.ACTION_HOVER_MOVE, x, y, 0
-    )
-    // Gán source qua reflection hoặc dùng obtain có source
-    // Cách đơn giản nhất: Dùng obtain với đầy đủ tham số (API 29+)
-    // Nếu không có, hãy dùng reflection (xem bên dưới)
-    wv.dispatchGenericMotionEvent(hover)
-    hover.recycle()
-
-    // 2. ACTION_DOWN (nhấn chuột trái)
-    handler.postDelayed({
-        val down = MotionEvent.obtain(
-            downTime, SystemClock.uptimeMillis(),
-            MotionEvent.ACTION_DOWN, x, y, 0
-        )
-        // Dùng reflection để set source và buttonState
-        try {
-            val setSource = MotionEvent::class.java.getMethod("setSource", Int::class.javaPrimitiveType)
-            setSource.invoke(down, InputDevice.SOURCE_MOUSE)
-            val setButtonState = MotionEvent::class.java.getMethod("setButtonState", Int::class.javaPrimitiveType)
-            setButtonState.invoke(down, MotionEvent.BUTTON_PRIMARY)
-        } catch (_: Exception) {}
-        
-        wv.dispatchTouchEvent(down)
-        down.recycle()
-    }, 50)
-
-    // 3. ACTION_UP (nhả chuột trái)
-    handler.postDelayed({
-        val up = MotionEvent.obtain(
-            downTime, SystemClock.uptimeMillis(),
-            MotionEvent.ACTION_UP, x, y, 0
-        )
-        try {
-            val setSource = MotionEvent::class.java.getMethod("setSource", Int::class.javaPrimitiveType)
-            setSource.invoke(up, InputDevice.SOURCE_MOUSE)
-            val setActionButton = MotionEvent::class.java.getMethod("setActionButton", Int::class.javaPrimitiveType)
-            setActionButton.invoke(up, MotionEvent.BUTTON_PRIMARY)
-        } catch (_: Exception) {}
-        
-        wv.dispatchTouchEvent(up)
-        up.recycle()
-    }, 120)
-}
-
-    /**
-     * Tìm tọa độ nút Play bằng JS, sau đó gửi click chuột thật vào tọa độ đó.
-     */
-    private fun performRealMouseClick(wv: WebView, handler: Handler) {
-        val jsFindPlayButton = """
-            (function() {
-                var selectors = [
-                    '#bigPlay',
-                    '.jw-icon-display', '.jw-display-icon-container', '.jw-bigplay',
-                    '.vjs-big-play-button', '.play-btn',
-                    'media-play-button', '[data-media-button]',
-                    'button[aria-label="Play"]', '[aria-label="Play"]',
-                    '.play-button', '.btn-play'
-                ];
-                
-                var button = null;
-                for (var i = 0; i < selectors.length; i++) {
-                    var el = document.querySelector(selectors[i]);
-                    if (el) { button = el; break; }
-                }
-                
-                // Nếu không thấy nút Play, tìm video và chọn tâm video
-                if (!button) {
-                    var v = document.querySelector('video');
-                    if (v) {
-                        var r = v.getBoundingClientRect();
-                        return JSON.stringify({x: r.left + r.width/2, y: r.top + r.height/2});
-                    }
-                    return null;
-                }
-                
-                // Xóa overlay quảng cáo che nút
-                var overlays = document.querySelectorAll('div[style*="z-index"], iframe');
-                for (var i = 0; i < overlays.length; i++) {
-                    var ov = overlays[i];
-                    try {
-                        var rect = ov.getBoundingClientRect();
-                        var btnRect = button.getBoundingClientRect();
-                        if (rect.left < btnRect.right && rect.right > btnRect.left &&
-                            rect.top < btnRect.bottom && rect.bottom > btnRect.top) {
-                            if (ov.id !== button.id && !ov.contains(button)) {
-                                ov.remove();
-                            }
-                        }
-                    } catch(e) {}
-                }
-                
-                var rect = button.getBoundingClientRect();
-                return JSON.stringify({x: rect.left + rect.width / 2, y: rect.top + rect.height / 2});
-            })();
-        """.trimIndent()
-
-        wv.evaluateJavascript(jsFindPlayButton) { rawResult ->
-            if (rawResult.isNullOrEmpty() || rawResult == "null") {
-                ClipboardLogger.logAndCopy("MouseClick", "Không tìm thấy nút Play, click giữa màn hình")
-                realMouseClick(wv, 540f, 960f, handler)
-                return@evaluateJavascript
-            }
-
-            try {
-                var cleaned = rawResult.trim()
-                if (cleaned.startsWith("\"") && cleaned.endsWith("\"")) {
-                    cleaned = cleaned.substring(1, cleaned.length - 1)
-                }
-                cleaned = cleaned.replace("\\\"", "\"").replace("\\\\", "\\")
-
-                val json = JSONObject(cleaned)
-                val x = json.optDouble("x", 540.0).toFloat()
-                val y = json.optDouble("y", 960.0).toFloat()
-
-                ClipboardLogger.logAndCopy("MouseClick", "Tọa độ nút Play: x=$x, y=$y")
-                realMouseClick(wv, x, y, handler)
-            } catch (e: Exception) {
-                ClipboardLogger.logAndCopy("MouseClick Error", "Lỗi parse: ${e.message}, raw=$rawResult")
-                realMouseClick(wv, 540f, 960f, handler)
-            }
-        }
-    }
-
-    // =====================================================================================
-    // WEBVIEW SNIFFER
+    // WEBVIEW SNIFFER (Cơ chế Vidscmov + Cookie)
     // =====================================================================================
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun sniffStream(pageUrl: String, referer: String, ua: String, seen: MutableList<String>): SniffResult? {
@@ -411,35 +278,32 @@ class SuperembedProvider : MainAPI() {
                         override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: android.os.Message?): Boolean = false
                     }
 
-                    // Script chống bot
-                    val antiBotJs = """
-                        (function() {
-                            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                            Object.defineProperty(navigator, 'languages', {get: () => ['vi-VN', 'vi', 'en']});
-                            Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
-                            window.chrome = { runtime: {} };
-                            window.open = function() { return { closed: false, focus: function(){}, close: function(){}, blur: function(){} }; };
-                        })();
-                    """.trimIndent()
+                    // Script Vidscmov: Fake popup và ép video phát
+                    val fakePopup = "try{window.open=function(){return {closed:false,focus:function(){},close:function(){},blur:function(){}}};}catch(e){}"
+                    val clickJs = "(function(){function fire(el){if(!el)return;try{el.click();}catch(e){}}" +
+                        "fire(document.getElementById('bigPlay'));" +
+                        "fire(document.querySelector('.jw-icon-display,.jw-display-icon-container,.jw-bigplay,[aria-label=Play],.vjs-big-play-button,.play-btn'));" +
+                        "var v=document.querySelector('video');if(v){v.muted=true;var p=v.play();if(p&&p.catch)p.catch(function(){});}})();"
 
                     var taps = 0
                     fun tap() {
                         if (finished) return
                         taps++
                         try {
-                            wv.evaluateJavascript(antiBotJs, null)
-                            // Gọi phương thức Click Chuột Thật
-                            performRealMouseClick(wv, handler)
+                            wv.evaluateJavascript(fakePopup + clickJs, null)
+                            // Chạm vào giữa màn hình để đánh lừa iframe
+                            val t = SystemClock.uptimeMillis()
+                            val d = MotionEvent.obtain(t, t, MotionEvent.ACTION_DOWN, w / 2f, h / 2f, 0)
+                            val u = MotionEvent.obtain(t, t + 60, MotionEvent.ACTION_UP, w / 2f, h / 2f, 0)
+                            wv.dispatchTouchEvent(d)
+                            wv.dispatchTouchEvent(u)
+                            d.recycle(); u.recycle()
                         } catch (_: Exception) {}
-                        
-                        if (taps < 60) handler.postDelayed({ tap() }, 2000)
+                        // Lặp lại 30 lần (khoảng 45 giây)
+                        if (taps < 30) handler.postDelayed({ tap() }, 1500)
                     }
 
                     wv.webViewClient = object : WebViewClient() {
-                        override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                            wv.evaluateJavascript(antiBotJs, null)
-                        }
-
                         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                             val u = request?.url?.toString() ?: return null
                             val reqHeaders = request?.requestHeaders ?: emptyMap()
@@ -467,8 +331,7 @@ class SuperembedProvider : MainAPI() {
                         }
 
                         override fun onPageFinished(view: WebView?, url: String?) {
-                            wv.evaluateJavascript(antiBotJs, null)
-                            handler.postDelayed({ tap() }, 1000)
+                            handler.postDelayed({ tap() }, 800)
                         }
                     }
 
@@ -482,7 +345,7 @@ class SuperembedProvider : MainAPI() {
                         CommonActivity.activity?.addContentView(wv, ViewGroup.LayoutParams(w, h))
                     } catch (_: Exception) {}
 
-                    handler.postDelayed({ finish(null) }, 180_000L)
+                    handler.postDelayed({ finish(null) }, 120_000L)
                     wv.loadUrl(pageUrl, mapOf("Referer" to referer))
                 } catch (e: Exception) {
                     ClipboardLogger.logAndCopy("Sniff Exception", e.stackTraceToString().take(800))
@@ -524,6 +387,7 @@ class SuperembedProvider : MainAPI() {
         }
 
         try {
+            // 1. THỬ DIRECT API
             val directUrl = if (type == "movie") {
                 "$BASE_URL/directstream.php?video_id=$tmdbId&tmdb=1"
             } else {
@@ -558,6 +422,7 @@ class SuperembedProvider : MainAPI() {
                 return true
             }
 
+            // 2. DÙNG WEBVIEW (CƠ CHẾ VIDSCMOV)
             val embedUrl = if (type == "movie") {
                 "$BASE_URL/?video_id=$tmdbId&tmdb=1"
             } else {
@@ -573,6 +438,7 @@ class SuperembedProvider : MainAPI() {
                 return false
             }
 
+            // ⭐ LẤY COOKIE VÀ GỘP HEADERS
             val playerReferer = "https://streamingnow.mov/"
             val cookie = CookieManager.getInstance().getCookie(result.url) ?: ""
             
