@@ -437,7 +437,20 @@ class SuperembedProvider : MainAPI() {
                                     if (!collected.contains(u)) { collected.add(u); first = collected.size == 1 }
                                 }
                                 // Trang đã tải danh sách server: chờ vài giây cho các request còn lại rồi dừng WebView
-                                if (first) handler.postDelayed({ finish(null) }, 7000L)
+                                if (first) {
+                                    // Ghi lại DOM của trang player (danh sách server, iframe) để biết cách chọn server
+                                    handler.postDelayed({
+                                        try {
+                                            wv.evaluateJavascript(
+                                                "(function(){var c=document.documentElement.cloneNode(true);c.querySelectorAll('script,style,svg,noscript').forEach(function(e){e.remove()});var f=[];document.querySelectorAll('iframe').forEach(function(i){f.push(i.src)});return c.outerHTML.replace(/\\s+/g,' ').slice(0,7000)+'\\n@@IFRAMES@@\\n'+f.join('\\n');})()"
+                                            ) { raw ->
+                                                val html = try { org.json.JSONArray("[" + (raw ?: "\"\"") + "]").optString(0) } catch (_: Exception) { raw ?: "" }
+                                                ClipboardLogger.logAndCopy("PlayerDOM", html)
+                                            }
+                                        } catch (_: Exception) {}
+                                    }, 4500L)
+                                    handler.postDelayed({ finish(null) }, 8500L)
+                                }
                             }
                             if (!junkRegex.containsMatchIn(u) && seen.size < 200) {
                                 seen.add(u.take(220))
@@ -753,7 +766,20 @@ class SuperembedProvider : MainAPI() {
             val result = sniffStream(embedUrl, fakeReferer, ua, seen, playUrls)
 
             if (result == null && playUrls.isNotEmpty()) {
-                return extractFromServers(playUrls.toList(), subtitleCallback, callback)
+                ClipboardLogger.logAndCopy("Servers", "Tìm thấy ${playUrls.size} server (playvideo.php)")
+                val hosts = Regex("mixdrop|streamtape|doodstream|dood\\.|voe\\.|filemoon|vidoza|streamwish|upstream|mp4upload|embedsito|lulustream", RegexOption.IGNORE_CASE)
+                val embeds = seen.filter { it.startsWith("http") && hosts.containsMatchIn(it) }.distinct()
+                ClipboardLogger.logAndCopy("Embeds", embeds.joinToString("\n").ifEmpty { "(không có)" })
+                var n = 0
+                for (e in embeds.take(6)) {
+                    try {
+                        loadExtractor(e, "https://streamingnow.mov/", subtitleCallback) { n++; callback(it) }
+                    } catch (ex: Exception) {
+                        if (ex is java.util.concurrent.CancellationException) throw ex
+                    }
+                }
+                ClipboardLogger.logAndCopy("Extractor", "Số link: $n")
+                return n > 0
             }
 
             if (result == null) {
