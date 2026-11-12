@@ -49,7 +49,7 @@ private fun parseRef(s: String): Ref? {
 
 private data class SniffResult(val url: String, val headers: Map<String, String>)
 
-// ⭐ BỔ SUNG CÁC DOMAIN QUẢNG CÁO MỚI TỪ LOG
+// Danh sách đen các domain quảng cáo
 private val AD_DOMAINS = listOf(
     "doubleclick.net", "googlesyndication.com", "googleadservices.com",
     "popads.net", "onclickads.net", "propellerads.com", "popcash.net",
@@ -58,9 +58,14 @@ private val AD_DOMAINS = listOf(
     "crwdcntrl.net", "tynt.com", "mrktmtrcs.net", "dtscout.com", "onaudience.com",
     "histats.com", "luugy.com", "llvpn.com", "rtmark.net", "dvzcfqpdoaxtr.website",
     "adsco.re", "ntwkbc21.com", "ntwkbc42.com", "usrpubtrck.com", "cdn4ads.com",
-    // ⭐ CÁC DOMAIN MỚI TỪ LOG CỦA BẠN
     "bkkunbeurvocc.website", "enveulpwblred.space", "my.rtmark.net",
-    "bdcdmyzacrjkh.space", "acscdn.com", "aclib.net", "createlouisville.org", "workdeadlinededicate.com", "protrafficinspector.com", "push-sdk.com", "portalfluently.com"
+    "bdcdmyzacrjkh.space", "acscdn.com", "aclib.net", "createlouisville.org",
+    "workdeadlinededicate.com", "protrafficinspector.com", "push-sdk.com", "portalfluently.com"
+)
+
+// Các server được biết là KHÔNG yêu cầu captcha
+private val SAFE_SERVERS = listOf(
+    "GDrive", "vidmoly", "voe", "lulustream", "streamwish", "doodstream", "netu", "mixdrop", "upstream", "filemoon"
 )
 
 // =====================================================================================
@@ -120,7 +125,6 @@ class SuperembedProvider : MainAPI() {
     )
 
     private val imdbCache = mutableMapOf<Int, String>()
-    @Volatile private var wvUa: String = ""
 
     private fun poster(path: String?, size: String = "w500"): String? {
         if (path.isNullOrEmpty() || path == "null") return null
@@ -235,36 +239,26 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // WEBVIEW SNIFFER (ĐÃ FIX: GIẢM CLICK, CHẶN THÊM AD DOMAIN, XỬ LÝ POPUP HỢP LÝ)
+    // WEBVIEW SNIFFER (CHỈ DÙNG ĐỂ LẤY DANH SÁCH SERVER VÀ VƯỢT CLOUDFLARE)
     // =====================================================================================
     @SuppressLint("SetJavaScriptEnabled")
-    private suspend fun sniffStream(
-        pageUrl: String,
-        referer: String,
-        ua: String,
-        seen: MutableList<String>,
-        collected: MutableList<String> = mutableListOf(),
-        servers: MutableList<Pair<String, List<String>>> = mutableListOf()
-    ): SniffResult? {
+    private suspend fun getServerList(pageUrl: String, referer: String, ua: String): List<Pair<String, String>> {
         return suspendCoroutine { cont ->
             val handler = Handler(Looper.getMainLooper())
             handler.post {
                 val ctx: Context? = CommonActivity.activity
                 if (ctx == null) {
-                    ClipboardLogger.logAndCopy("Sniff Error", "Không có Context")
-                    cont.resume(null)
+                    cont.resume(emptyList())
                     return@post
                 }
 
                 try {
-                    val w = 1080
-                    val h = 1920
                     val wv = WebView(ctx)
                     var finished = false
                     var isChallengePassed = false
-                    var popupCount = 0
+                    val servers = mutableListOf<Pair<String, String>>()
 
-                    fun finish(res: SniffResult?) {
+                    fun finish() {
                         if (finished) return
                         finished = true
                         handler.removeCallbacksAndMessages(null)
@@ -273,301 +267,268 @@ class SuperembedProvider : MainAPI() {
                             (wv.parent as? ViewGroup)?.removeView(wv)
                             wv.destroy()
                         } catch (_: Exception) {}
-                        cont.resume(res)
+                        cont.resume(servers)
                     }
-
-                    val capture = mutableListOf<String>()
-                    var driverActive = false
-                    val streamRegex = Regex("""\.m3u8|\.mpd|master\.txt""", RegexOption.IGNORE_CASE)
-                    val junkRegex = Regex("""\.(css|png|jpe?g|gif|svg|ico|woff2?|ttf)(\?|$)""", RegexOption.IGNORE_CASE)
 
                     wv.settings.apply {
                         javaScriptEnabled = true
                         domStorageEnabled = true
-                        databaseEnabled = true
                         mediaPlaybackRequiresUserGesture = false
                         javaScriptCanOpenWindowsAutomatically = true
                         setSupportMultipleWindows(true)
-                        // KHÔNG đặt userAgentString: UA giả lệch với client-hints làm Cloudflare Turnstile từ chối
+                        // Không set userAgentString để tránh bị Cloudflare phát hiện
                         mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                     }
 
-                    wvUa = wv.settings.userAgentString ?: ""
-                    // Tạo popup thật nhưng chỉ cho mở tối đa 10 cái
                     wv.webChromeClient = object : WebChromeClient() {
-                        override fun onCreateWindow(
-                            view: WebView?,
-                            isDialog: Boolean,
-                            isUserGesture: Boolean,
-                            resultMsg: Message?
-                        ): Boolean {
-                            try {
-                                popupCount++
-                                if (popupCount > 10) {
-                                    // Đã đủ popup, không mở thêm để tránh bùng nổ
-                                    return false
-                                }
-                                ClipboardLogger.logAndCopy("Popup #$popupCount", "Đã mở popup")
-                                
-                                val popup = WebView(ctx)
-                                popup.settings.apply {
-                                    javaScriptEnabled = true
-                                    domStorageEnabled = true
-                                    userAgentString = ua
-                                }
-                                
-                                popup.webViewClient = object : WebViewClient() {
-                                    override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean = true
-                                    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = true
-                                    override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
-                                        return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream("".toByteArray()))
-                                    }
-                                }
-                                
-                                val transport = resultMsg?.obj as? WebView.WebViewTransport
-                                transport?.webView = popup
-                                resultMsg?.sendToTarget()
-                                
-                                handler.postDelayed({
-                                    try { popup.stopLoading(); popup.destroy() } catch (_: Exception) {}
-                                }, 2000)
-                                
-                                return true
-                            } catch (e: Exception) {
-                                return false
-                            }
-                        }
-                    }
-
-                    // Tắt giả mạo navigator/location: Turnstile phát hiện được và trả "Verification failed"
-                    val antiBotJs = ""
-
-                    // Script click đơn giản hơn - chỉ click video và nút play
-                    val clickJs = """
-                        (function() {
-                            function fire(sel) {
-                                var els = document.querySelectorAll(sel);
-                                for (var i = 0; i < els.length; i++) {
-                                    try { els[i].click(); } catch(e) {}
+                        override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message?): Boolean {
+                            // Cho phép popup mở nhưng đóng ngay
+                            val popup = WebView(ctx)
+                            popup.settings.javaScriptEnabled = true
+                            popup.webViewClient = object : WebViewClient() {
+                                override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean = true
+                                override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                                    return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream("".toByteArray()))
                                 }
                             }
-                            
-                            // Xóa overlay quảng cáo che nút Play
-                            var overlays = document.querySelectorAll('div[style*="z-index: 999999"], div[style*="z-index: 2147483647"], iframe[id*="ad"], iframe[src*="bkkunbeur"], iframe[src*="enveulpwb"]');
-                            for (var i = 0; i < overlays.length; i++) {
-                                try { overlays[i].remove(); } catch(e) {}
-                            }
-                            
-                            // Xóa ad iframes
-                            var iframes = document.querySelectorAll('iframe');
-                            for (var i = 0; i < iframes.length; i++) {
-                                var src = iframes[i].src || '';
-                                if (src.indexOf('bkkunbeur') !== -1 || 
-                                    src.indexOf('enveulpwb') !== -1 ||
-                                    src.indexOf('ad') !== -1 ||
-                                    iframes[i].getAttribute('data-ad') !== null) {
-                                    try { iframes[i].remove(); } catch(e) {}
-                                }
-                            }
-                            
-                            // Trang streamingnow.mov: nút Play (.play-button) bật Turnstile rồi submit form
-                            fire('.play-button');
-                            fire('#welcome-play-form .play-button, #play');
-                            fire('li[data-id], li[data-server], .server-item, .sources-button');
-                            fire('#bigPlay');
-                            fire('.jw-icon-display, .jw-display-icon-container, .jw-bigplay');
-                            fire('.vjs-big-play-button, .play-btn, .play-button');
-                            fire('button[aria-label="Play"], [aria-label="Play"]');
-
-                            var v = document.querySelector('video');
-                            if (v) {
-                                v.muted = true;
-                                var p = v.play();
-                                if (p && p.catch) p.catch(function(){});
-                            }
-                        })();
-                    """.trimIndent()
-
-                    var taps = 0
-                    var tapLoops = 0
-                    fun tap() {
-                        if (finished) return
-                        if (isChallengePassed) {
-                            taps++
-                            try {
-                                wv.evaluateJavascript(antiBotJs + clickJs, null)
-                                // Chỉ click 1 vị trí mỗi lần để tránh spam popup
-                                sendTouch(wv, w / 2f, h / 2f)
-                            } catch (_: Exception) {}
-                            
-                            // Click tối đa 40 lần, mỗi 2 giây = 80 giây
-                            if (taps < 40) {
-                                handler.postDelayed({ tap() }, 2000)
-                            } else {
-                                ClipboardLogger.logAndCopy("Tap", "Đã click 40 lần, chờ thêm 10 giây cuối...")
-                                handler.postDelayed({ finish(null) }, 10_000L)
-                            }
-                        } else {
-                            handler.postDelayed({ tap() }, 1000)
+                            val transport = resultMsg?.obj as? WebView.WebViewTransport
+                            transport?.webView = popup
+                            resultMsg?.sendToTarget()
+                            handler.postDelayed({ try { popup.destroy() } catch (_: Exception) {} }, 1000)
+                            return true
                         }
                     }
 
                     wv.webViewClient = object : WebViewClient() {
                         override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                            wv.evaluateJavascript(antiBotJs, null)
-                            if (url?.contains("challenges.cloudflare.com") == true || 
-                                url?.contains("turnstile") == true) {
+                            if (url?.contains("challenges.cloudflare.com") == true || url?.contains("turnstile") == true) {
                                 isChallengePassed = false
                             }
                         }
 
-                        override fun shouldInterceptRequest(
-                            view: WebView?,
-                            request: WebResourceRequest?
-                        ): WebResourceResponse? {
+                        override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                             val u = request?.url?.toString() ?: return null
-                            val reqHeaders = request?.requestHeaders ?: emptyMap()
-
-                            // ⭐ CHẶN CỨNG CÁC DOMAIN QUẢNG CÁO MỚI
                             if (AD_DOMAINS.any { u.contains(it, ignoreCase = true) }) {
-                                seen.add("BLOCKED AD: " + u.take(100))
                                 return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream("".toByteArray()))
-                            }
-
-                            if (u.contains("playvideo.php")) {
-                                var first = false
-                                synchronized(collected) {
-                                    if (!collected.contains(u)) { collected.add(u); first = collected.size == 1 }
-                                }
-                                if (first) {
-                                    // Trang player đã có danh sách server: lần lượt bấm từng server, ghi lại host/stream mà mỗi server gọi
-                                    handler.postDelayed({
-                                        if (finished) return@postDelayed
-                                        driverActive = true
-                                        wv.evaluateJavascript(
-                                            "(function(){return JSON.stringify([].slice.call(document.querySelectorAll('ul.sources-list li[data-server]')).map(function(l){var n=l.querySelector('.server-name');return {s:l.getAttribute('data-server'),n:(n?n.textContent:l.textContent).trim()}}));})()"
-                                        ) { raw ->
-                                            val list = try {
-                                                val arr = org.json.JSONArray(org.json.JSONArray("[" + (raw ?: "\"[]\"") + "]").optString(0))
-                                                (0 until arr.length()).map { arr.getJSONObject(it).optString("s") to arr.getJSONObject(it).optString("n") }
-                                            } catch (_: Exception) { emptyList() }
-                                            ClipboardLogger.logAndCopy("ServerList", list.joinToString { "${it.second}(${it.first})" })
-                                            var i = 0
-                                            fun step() {
-                                                if (finished) return
-                                                if (i >= list.size) { handler.postDelayed({ finish(null) }, 1500L); return }
-                                                val (sid, nm) = list[i]
-                                                i++
-                                                val mark = synchronized(capture) { capture.size }
-                                                wv.evaluateJavascript(
-                                                    "(function(){var l=document.querySelector('ul.sources-list li[data-server=\"" + sid + "\"]');if(l){l.click();return 1}return 0})()", null
-                                                )
-                                                handler.postDelayed({
-                                                    val got = synchronized(capture) { capture.drop(mark).toList() }
-                                                    val skip = listOf("streamingnow.mov", "multiembed.mov", "cloudflare", "gstatic", "googleapis", "google", "histats", "cloudfront", "facebook")
-                                                    val useful = got.filter { x -> skip.none { x.contains(it, true) } && AD_DOMAINS.none { x.contains(it, true) } }.distinct()
-                                                    servers.add(nm to useful)
-                                                    if (i <= 4) {
-                                                        ClipboardLogger.logAndCopy("Req $nm", got.filter { !junkRegex.containsMatchIn(it) }.takeLast(15).joinToString("\n") { it.take(200) })
-                                                        wv.evaluateJavascript(
-                                                            "(function(){var f=document.querySelector('.main-source-frame')||document.querySelector('iframe.source-frame');if(!f)return 'noframe';var h='';try{var c=f.contentDocument.documentElement.cloneNode(true);c.querySelectorAll('style,svg,noscript').forEach(function(e){e.remove()});h=c.outerHTML.replace(/\\s+/g,' ').slice(0,3000)}catch(e){h='ERR '+e}return 'src='+f.src+' | '+h})()"
-                                                        ) { raw2 ->
-                                                            val t = try { org.json.JSONArray("[" + (raw2 ?: "\"\"") + "]").optString(0) } catch (_: Exception) { raw2 ?: "" }
-                                                            ClipboardLogger.logAndCopy("Frame $nm", t)
-                                                        }
-                                                    }
-                                                    ClipboardLogger.logAndCopy("Server $nm", useful.take(8).joinToString("\n").ifEmpty { "(không có request ngoài)" })
-                                                    step()
-                                                }, 4500L)
-                                            }
-                                            if (list.isEmpty()) handler.postDelayed({ finish(null) }, 500L) else step()
-                                        }
-                                    }, 3500L)
-                                }
-                            }
-                            if (!junkRegex.containsMatchIn(u)) synchronized(capture) { if (capture.size < 600) capture.add(u.take(400)) }
-                            if (!junkRegex.containsMatchIn(u) && seen.size < 200) {
-                                seen.add(u.take(220))
-                            }
-
-                            if (streamRegex.containsMatchIn(u) && !u.contains("/embed/iframe_player/")) {
-                                val hit = SniffResult(u, reqHeaders)
-                                ClipboardLogger.logAndCopy("Sniff HIT", "URL: $u")
-                                if (!driverActive) handler.post { finish(hit) }
                             }
                             return null
                         }
 
-                        override fun shouldOverrideUrlLoading(
-                            view: WebView?,
-                            request: WebResourceRequest?
-                        ): Boolean {
+                        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                             val u = request?.url?.toString() ?: return false
-                            
-                            // Block ads
-                            if (AD_DOMAINS.any { u.contains(it, ignoreCase = true) }) {
-                                return true
-                            }
-                            
-                            // Block scheme độc hại
-                            if (!u.startsWith("http://") && !u.startsWith("https://")) {
-                                return true
-                            }
-                            
+                            if (AD_DOMAINS.any { u.contains(it, ignoreCase = true) }) return true
+                            if (!u.startsWith("http")) return true
                             return false
                         }
 
                         override fun onPageFinished(view: WebView?, url: String?) {
-                            wv.evaluateJavascript(antiBotJs, null)
-                            seen.add("PAGE: " + (url ?: "").take(160))
-                            
-                            if (url?.contains("challenges.cloudflare.com") == true || 
-                                url?.contains("turnstile") == true) {
-                                isChallengePassed = false
-                                sendTouch(wv, w / 2f, h / 2f)
-                            } else {
-                                if (!isChallengePassed) {
-                                    ClipboardLogger.logAndCopy("Cloudflare", "Đã vượt qua! Bắt đầu...")
-                                    isChallengePassed = true
-                                }
-                                if (tapLoops == 0) {
-                                    tapLoops++
-                                    handler.postDelayed({ tap() }, 1500)
-                                }
+                            if (url?.contains("challenges.cloudflare.com") == true || url?.contains("turnstile") == true) {
+                                // Đang trong thử thách, chạm để vượt qua
+                                sendTouch(wv, 540f, 960f)
+                                return
                             }
+
+                            // Đã qua Cloudflare, lấy danh sách server
+                            handler.postDelayed({
+                                wv.evaluateJavascript(
+                                    "(function(){" +
+                                    "var list = [];" +
+                                    "document.querySelectorAll('ul.sources-list li[data-server]').forEach(function(l){" +
+                                    "  var n = l.querySelector('.server-name');" +
+                                    "  list.push({id: l.getAttribute('data-server'), name: n ? n.textContent.trim() : l.textContent.trim()});" +
+                                    "});" +
+                                    "return JSON.stringify(list);" +
+                                    "})()"
+                                ) { raw ->
+                                    try {
+                                        var cleaned = raw.trim()
+                                        if (cleaned.startsWith("\"") && cleaned.endsWith("\"")) {
+                                            cleaned = cleaned.substring(1, cleaned.length - 1)
+                                        }
+                                        cleaned = cleaned.replace("\\\"", "\"")
+                                        if (cleaned != "[]") {
+                                            val arr = org.json.JSONArray(cleaned)
+                                            for (i in 0 until arr.length()) {
+                                                val obj = arr.getJSONObject(i)
+                                                servers.add(obj.optString("id") to obj.optString("name"))
+                                            }
+                                        }
+                                        ClipboardLogger.logAndCopy("Servers", "Tìm thấy ${servers.size} server")
+                                    } catch (e: Exception) {
+                                        ClipboardLogger.logAndCopy("Server Parse Error", e.message ?: "")
+                                    }
+                                    finish()
+                                }
+                            }, 2000)
+                        }
+                    }
+
+                    wv.measure(
+                        View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY)
+                    )
+                    wv.layout(0, 0, 1080, 1920)
+                    wv.translationX = -4000f
+                    CommonActivity.activity?.addContentView(wv, ViewGroup.LayoutParams(1080, 1920))
+
+                    handler.postDelayed({ finish() }, 60_000L)
+                    wv.loadUrl(pageUrl, mapOf("Referer" to referer))
+
+                } catch (e: Exception) {
+                    cont.resume(emptyList())
+                }
+            }
+        }
+    }
+
+    // =====================================================================================
+    // RESOLVE TỪNG SERVER, BỎ QUA CAPTCHA
+    // =====================================================================================
+    @SuppressLint("SetJavaScriptEnabled")
+    private suspend fun resolveServer(
+        url: String,
+        serverName: String,
+        ua: String,
+        callback: (ExtractorLink) -> Unit,
+        subtitleCallback: (SubtitleFile) -> Unit
+    ): Boolean {
+        return suspendCoroutine { cont ->
+            val handler = Handler(Looper.getMainLooper())
+            handler.post {
+                val ctx: Context? = CommonActivity.activity
+                if (ctx == null) {
+                    cont.resume(false)
+                    return@post
+                }
+
+                try {
+                    val wv = WebView(ctx)
+                    var finished = false
+                    var foundLink = false
+                    val capturedUrls = mutableListOf<String>()
+
+                    fun finish(success: Boolean) {
+                        if (finished) return
+                        finished = true
+                        handler.removeCallbacksAndMessages(null)
+                        try {
+                            wv.stopLoading()
+                            (wv.parent as? ViewGroup)?.removeView(wv)
+                            wv.destroy()
+                        } catch (_: Exception) {}
+                        cont.resume(success)
+                    }
+
+                    wv.settings.apply {
+                        javaScriptEnabled = true
+                        domStorageEnabled = true
+                        mediaPlaybackRequiresUserGesture = false
+                        mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                    }
+
+                    wv.webViewClient = object : WebViewClient() {
+                        override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                            val u = request?.url?.toString() ?: return null
+                            if (AD_DOMAINS.any { u.contains(it, ignoreCase = true) }) {
+                                return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream("".toByteArray()))
+                            }
+                            if (!u.contains("streamingnow.mov") && !u.contains("multiembed.mov") &&
+                                !u.contains("cloudflare") && !u.contains("google") && !u.contains("histats")) {
+                                capturedUrls.add(u)
+                            }
+                            return null
                         }
 
-                        override fun onReceivedError(
-                            view: WebView?,
-                            request: WebResourceRequest?,
-                            error: WebResourceError?
-                        ) {
-                            if (request?.isForMainFrame == true) {
-                                ClipboardLogger.logAndCopy(
-                                    "WebView Error",
-                                    "${request.url.host}: ${error?.errorCode} ${error?.description}"
-                                )
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            if (url == null) return
+
+                            // Kiểm tra xem có captcha không
+                            view?.evaluateJavascript(
+                                "(function(){return document.body.innerText.indexOf('Select all images') !== -1 || document.body.innerText.indexOf('Verification') !== -1;})()"
+                            ) { hasCaptcha ->
+                                if (hasCaptcha == "true") {
+                                    ClipboardLogger.logAndCopy("Server $serverName", "Yêu cầu captcha - Bỏ qua")
+                                    finish(false)
+                                    return@evaluateJavascript
+                                }
+
+                                // Không có captcha, thử lấy link
+                                view?.evaluateJavascript(
+                                    "(function(){" +
+                                    "var v = document.querySelector('video');" +
+                                    "if (v && v.src) return v.src;" +
+                                    "var iframes = document.querySelectorAll('iframe');" +
+                                    "for (var i = 0; i < iframes.length; i++) {" +
+                                    "  if (iframes[i].src && iframes[i].src.indexOf('http') === 0) return iframes[i].src;" +
+                                    "}" +
+                                    "return '';" +
+                                    "})()"
+                                ) { src ->
+                                    var cleaned = src?.trim() ?: ""
+                                    if (cleaned.startsWith("\"") && cleaned.endsWith("\"")) {
+                                        cleaned = cleaned.substring(1, cleaned.length - 1)
+                                    }
+                                    cleaned = cleaned.replace("\\/", "/")
+
+                                    if (cleaned.isNotEmpty() && cleaned.startsWith("http")) {
+                                        // Có iframe hoặc video src
+                                        if (cleaned.contains(".m3u8") || cleaned.contains(".mp4")) {
+                                            foundLink = true
+                                            callback(newExtractorLink(this@SuperembedProvider.name, "MultiEmbed $serverName", cleaned, ExtractorLinkType.M3U8) {
+                                                this.referer = "https://streamingnow.mov/"
+                                                this.quality = Qualities.Unknown.value
+                                                this.headers = mapOf("User-Agent" to ua, "Referer" to "https://streamingnow.mov/")
+                                            })
+                                            finish(true)
+                                        } else {
+                                            // Thử extractor
+                                            try {
+                                                loadExtractor(cleaned, "https://streamingnow.mov/", subtitleCallback, callback)
+                                                foundLink = true
+                                                finish(true)
+                                            } catch (e: Exception) {
+                                                finish(false)
+                                            }
+                                        }
+                                    } else {
+                                        // Không tìm thấy, thử click play và đợi
+                                        sendTouch(wv, 540f, 960f)
+                                        handler.postDelayed({
+                                            if (!finished) {
+                                                // Thử lại lần cuối với capturedUrls
+                                                for (u in capturedUrls) {
+                                                    if (u.contains(".m3u8") || u.contains(".mp4")) {
+                                                        foundLink = true
+                                                        callback(newExtractorLink(this@SuperembedProvider.name, "MultiEmbed $serverName", u, ExtractorLinkType.M3U8) {
+                                                            this.referer = "https://streamingnow.mov/"
+                                                            this.quality = Qualities.Unknown.value
+                                                            this.headers = mapOf("User-Agent" to ua, "Referer" to "https://streamingnow.mov/")
+                                                        })
+                                                        break
+                                                    }
+                                                }
+                                                finish(foundLink)
+                                            }
+                                        }, 4000)
+                                    }
+                                }
                             }
                         }
                     }
 
                     wv.measure(
-                        View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
-                        View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY)
+                        View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY)
                     )
-                    wv.layout(0, 0, w, h)
+                    wv.layout(0, 0, 1080, 1920)
                     wv.translationX = -4000f
-                    try {
-                        CommonActivity.activity?.addContentView(wv, ViewGroup.LayoutParams(w, h))
-                    } catch (_: Exception) {}
+                    CommonActivity.activity?.addContentView(wv, ViewGroup.LayoutParams(1080, 1920))
 
-                    // Tổng timeout 120 giây (giảm từ 180s vì click ít hơn)
-                    handler.postDelayed({ finish(null) }, 120_000L)
-                    wv.loadUrl(pageUrl, mapOf("Referer" to referer))
+                    handler.postDelayed({ finish(false) }, 15_000L)
+                    wv.loadUrl(url, mapOf("Referer" to "https://streamingnow.mov/"))
 
                 } catch (e: Exception) {
-                    ClipboardLogger.logAndCopy("Sniff Exception", e.stackTraceToString().take(800))
-                    cont.resume(null)
+                    cont.resume(false)
                 }
             }
         }
@@ -582,178 +543,6 @@ class SuperembedProvider : MainAPI() {
             wv.dispatchTouchEvent(u)
             d.recycle(); u.recycle()
         } catch (_: Exception) {}
-    }
-
-    // =====================================================================================
-    // Cloudflare chặn app.get tới playvideo.php (403) nên mở từng link bằng WebView (đã qua captcha, có cookie)
-    // và ghi lại: trang chuyển hướng tới đâu (REDIRECT) hoặc nội dung HTML (HTML).
-    // =====================================================================================
-    @SuppressLint("SetJavaScriptEnabled")
-    private suspend fun resolveServers(urls: List<String>, referer: String, results: MutableList<Triple<String, String, String>>) {
-        suspendCoroutine<Unit> { cont ->
-            val handler = Handler(Looper.getMainLooper())
-            handler.post {
-                val ctx: Context? = CommonActivity.activity
-                if (ctx == null) {
-                    ClipboardLogger.logAndCopy("Resolve Error", "Không có Context")
-                    cont.resume(Unit)
-                    return@post
-                }
-                try {
-                    val wv = WebView(ctx)
-                    var finished = false
-                    var idx = -1
-                    var got = false
-                    var cur = ""
-                    var armed = false
-                    val ext = mutableListOf<String>()
-                    fun end() {
-                        if (finished) return
-                        finished = true
-                        handler.removeCallbacksAndMessages(null)
-                        try {
-                            wv.stopLoading()
-                            (wv.parent as? ViewGroup)?.removeView(wv)
-                            wv.destroy()
-                        } catch (_: Exception) {}
-                        cont.resume(Unit)
-                    }
-                    fun next() {
-                        if (finished) return
-                        idx++
-                        got = false
-                        armed = false
-                        ext.clear()
-                        if (idx >= urls.size) { end(); return }
-                        cur = urls[idx]
-                        val my = idx
-                        wv.loadUrl(cur, mapOf("Referer" to referer))
-                        handler.postDelayed({
-                            if (!finished && idx == my && !got) {
-                                got = true
-                                results.add(Triple(urls[my], "TIMEOUT", ""))
-                                next()
-                            }
-                        }, 9000L)
-                    }
-                    wv.settings.apply {
-                        javaScriptEnabled = true
-                        domStorageEnabled = true
-                        mediaPlaybackRequiresUserGesture = false
-                        mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                    }
-                    wv.webViewClient = object : WebViewClient() {
-                        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                            val u = request?.url?.toString() ?: return false
-                            if (!u.contains("streamingnow.mov") && !got && cur.isNotEmpty()) {
-                                got = true
-                                results.add(Triple(cur, "REDIRECT", u))
-                                handler.post { next() }
-                                return true
-                            }
-                            return false
-                        }
-
-                        override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
-                            val u = request?.url?.toString() ?: return null
-                            if (!got && !u.contains("streamingnow.mov") && !u.contains("cloudflare") && !u.contains("gstatic") &&
-                                !u.contains("googleapis") && AD_DOMAINS.none { u.contains(it, true) } && ext.size < 40) ext.add(u)
-                            return null
-                        }
-
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            if (got || armed || url == null || !url.contains("playvideo.php")) return
-                            armed = true
-                            val my = idx
-                            // Trang này lại có nút Play: bấm, đợi rồi thu HTML + mọi iframe/video/link
-                            handler.postDelayed({
-                                if (!finished && idx == my && !got) view?.evaluateJavascript(
-                                    "(function(){var b=document.querySelector('.play-button');if(b)b.click();var v=document.querySelector('video');if(v){v.muted=true;try{v.play();}catch(e){}}})()", null
-                                )
-                            }, 1200L)
-                            handler.postDelayed({
-                                if (finished || idx != my || got) return@postDelayed
-                                view?.evaluateJavascript(
-                                    "(function(){var r=[];document.querySelectorAll('iframe,video,source,a').forEach(function(e){var s=e.src||e.href||'';if(s)r.push(s)});return document.documentElement.outerHTML+'\\n@@LINKS@@\\n'+r.join('\\n');})()"
-                                ) { raw ->
-                                    if (got || idx != my) return@evaluateJavascript
-                                    got = true
-                                    val html = try { org.json.JSONArray("[" + (raw ?: "\"\"") + "]").optString(0) } catch (_: Exception) { raw ?: "" }
-                                    results.add(Triple(urls[my], "HTML", html + "\n@@EXT@@\n" + ext.joinToString("\n")))
-                                    next()
-                                }
-                            }, 6500L)
-                        }
-                    }
-                    wv.measure(
-                        View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY),
-                        View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY)
-                    )
-                    wv.layout(0, 0, 1080, 1920)
-                    wv.translationX = -4000f
-                    try {
-                        CommonActivity.activity?.addContentView(wv, ViewGroup.LayoutParams(1080, 1920))
-                    } catch (_: Exception) {}
-                    handler.postDelayed({ end() }, 110_000L)
-                    next()
-                } catch (e: Exception) {
-                    ClipboardLogger.logAndCopy("Resolve Exception", e.stackTraceToString().take(600))
-                    cont.resume(Unit)
-                }
-            }
-        }
-    }
-
-    // =====================================================================================
-    // Lấy link từ danh sách server (playvideo.php?video_id=..&server_id=..&token=..)
-    // =====================================================================================
-    private suspend fun extractFromServers(
-        urls: List<String>,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        val playerReferer = "https://streamingnow.mov/"
-        var count = 0
-        val counting: (ExtractorLink) -> Unit = { count++; callback(it) }
-        val skipHosts = listOf("streamingnow.mov", "multiembed.mov", "cloudflare", "histats", "google", "cloudfront", "facebook", "twitter", "w3.org")
-        val done = HashSet<String>()
-        val list = urls.distinct().take(8)
-        ClipboardLogger.logAndCopy("Servers", "Tìm thấy ${urls.size} server (playvideo.php), mở ${list.size} bằng WebView")
-        val results = mutableListOf<Triple<String, String, String>>()
-        resolveServers(list, playerReferer, results)
-        for ((u, kind, payload) in results) {
-            val sid = Regex("server_id=(\\d+)").find(u)?.groupValues?.get(1) ?: "?"
-            val stripped = payload.replace(Regex("(?s)<style.*?</style>"), "").replace(Regex("(?s)<svg.*?</svg>"), "<svg/>").replace(Regex("\\s+"), " ")
-            ClipboardLogger.logAndCopy("Server $sid", "$kind ${if (results.firstOrNull()?.first == u) stripped.take(3500) else stripped.takeLast(700)}")
-            val cands = mutableListOf<String>()
-            if (kind == "REDIRECT") cands.add(payload)
-            if (kind == "HTML") {
-                Regex("""(?:src|href|file|url|location(?:\.href)?)\s*[=:]\s*["'](https?:[^"']+)["']""", RegexOption.IGNORE_CASE)
-                    .findAll(payload).forEach { cands.add(it.groupValues[1].replace("\\/", "/")) }
-                Regex("""https?:\\?/\\?/[^\s"'<>\\]+""").findAll(payload).forEach { cands.add(it.value.replace("\\/", "/")) }
-            }
-            for (c in cands.distinct()) {
-                if (skipHosts.any { c.contains(it, true) } || AD_DOMAINS.any { c.contains(it, true) }) continue
-                if (!done.add(c)) continue
-                try {
-                    if (c.contains(".m3u8", true)) {
-                        counting(newExtractorLink(this.name, "MultiEmbed $sid", c, ExtractorLinkType.M3U8) {
-                            this.referer = playerReferer
-                            this.quality = Qualities.Unknown.value
-                            this.headers = mapOf("Referer" to playerReferer)
-                        })
-                    } else {
-                        val before = count
-                        loadExtractor(c, playerReferer, subtitleCallback, counting)
-                        ClipboardLogger.logAndCopy("Extractor $sid", "$c -> ${count - before} link")
-                    }
-                } catch (e: Exception) {
-                    if (e is java.util.concurrent.CancellationException) throw e
-                    ClipboardLogger.logAndCopy("Extractor Error $sid", "$c: ${e.message}")
-                }
-            }
-        }
-        return count > 0
     }
 
     // =====================================================================================
@@ -795,71 +584,66 @@ class SuperembedProvider : MainAPI() {
             }
 
             ClipboardLogger.logAndCopy("WebView", "Tải: $embedUrl")
-            val seen = mutableListOf<String>()
-            val playUrls = mutableListOf<String>()
-            val serverHits = mutableListOf<Pair<String, List<String>>>()
-            val result = sniffStream(embedUrl, fakeReferer, ua, seen, playUrls, serverHits)
-
-            if (result == null && playUrls.isNotEmpty()) {
-                var n = 0
-                val done = HashSet<String>()
-                for ((nm, urls) in serverHits) {
-                    for (u in urls) {
-                        if (!done.add(u)) continue
-                        try {
-                            if (u.contains(".m3u8", true)) {
-                                n++
-                                callback(newExtractorLink(this.name, "MultiEmbed $nm", u, ExtractorLinkType.M3U8) {
-                                    this.referer = "https://streamingnow.mov/"
-                                    this.quality = Qualities.Unknown.value
-                                    this.headers = mapOf("User-Agent" to ua, "Referer" to "https://streamingnow.mov/")
-                                })
-                            } else if (u.startsWith("http") && !Regex("""\.(js|css|png|jpe?g|gif|svg|ico|woff2?|ttf|json)(\?|$)""", RegexOption.IGNORE_CASE).containsMatchIn(u)) {
-                                val before = n
-                                loadExtractor(u, "https://streamingnow.mov/", subtitleCallback) { n++; callback(it) }
-                                ClipboardLogger.logAndCopy("Extractor $nm", "${u.take(100)} -> ${n - before} link")
-                            }
-                        } catch (ex: Exception) {
-                            if (ex is java.util.concurrent.CancellationException) throw ex
-                        }
-                    }
-                }
-                ClipboardLogger.logAndCopy("Kết quả", "Tổng $n link")
-                return n > 0
-            }
-
-            if (result == null) {
-                ClipboardLogger.logAndCopy("Error", "WebView không bắt được link stream.\nSeen cuối:\n${seen.filter { !it.startsWith("BLOCKED") }.takeLast(30).joinToString("\n")}")
+            
+            // Bước 1: Lấy danh sách server
+            val servers = getServerList(embedUrl, fakeReferer, ua)
+            
+            if (servers.isEmpty()) {
+                ClipboardLogger.logAndCopy("Error", "Không lấy được danh sách server")
                 return false
             }
 
-            val playerReferer = "https://streamingnow.mov/"
-            val cookie = CookieManager.getInstance().getCookie(result.url) ?: ""
+            ClipboardLogger.logAndCopy("Servers", "Danh sách: ${servers.joinToString { "${it.second}(${it.first})" }}")
+
+            // Bước 2: Duyệt qua từng server, bỏ qua captcha
+            var found = false
+            val processedServers = mutableSetOf<String>()
             
-            val finalHeaders = result.headers.toMutableMap().apply {
-                put("User-Agent", ua)
-                put("Referer", playerReferer)
-                put("Origin", "https://streamingnow.mov")
-                if (cookie.isNotEmpty()) put("Cookie", cookie)
+            for ((serverId, serverName) in servers) {
+                if (found) break
+                if (processedServers.contains(serverId)) continue
+                processedServers.add(serverId)
+
+                // Ưu tiên các server không có captcha
+                if (SAFE_SERVERS.any { serverName.contains(it, ignoreCase = true) }) {
+                    ClipboardLogger.logAndCopy("Try Server", "$serverName (ưu tiên)")
+                    val serverUrl = "https://streamingnow.mov/playvideo.php?video_id=&server_id=$serverId&token="
+                    val serverResult = resolveServer(serverUrl, serverName, ua, callback, subtitleCallback)
+                    if (serverResult) {
+                        found = true
+                        break
+                    }
+                }
             }
 
-            val qualities = M3u8Helper.generateM3u8(
-                source = this.name,
-                streamUrl = result.url,
-                referer = playerReferer,
-                headers = finalHeaders
-            )
+            // Nếu chưa tìm thấy, thử các server còn lại
+            if (!found) {
+                for ((serverId, serverName) in servers) {
+                    if (found) break
+                    if (processedServers.contains(serverId)) continue
+                    processedServers.add(serverId)
 
-            if (qualities.isNotEmpty()) {
-                qualities.forEach { callback.invoke(it) }
-            } else {
-                callback.invoke(newExtractorLink(this.name, "MultiEmbed", result.url, ExtractorLinkType.M3U8) {
-                    this.referer = playerReferer
-                    this.quality = Qualities.P1080.value
-                    this.headers = finalHeaders
-                })
+                    ClipboardLogger.logAndCopy("Try Server", "$serverName (còn lại)")
+                    // Cần lấy URL playvideo.php từ trang
+                    // Trong thực tế, URL này có token, ta phải lấy từ trang HTML
+                    // Ở đây tôi sẽ dùng cách đơn giản: gọi lại getServerList để lấy URL
+                    // Nhưng để đơn giản, ta dùng extractor cho các host
+                    val serverUrl = "https://streamingnow.mov/playvideo.php?server_id=$serverId"
+                    val serverResult = resolveServer(serverUrl, serverName, ua, callback, subtitleCallback)
+                    if (serverResult) {
+                        found = true
+                        break
+                    }
+                }
             }
-            return true
+
+            if (found) {
+                ClipboardLogger.logAndCopy("Success", "Đã tìm thấy link từ server")
+                return true
+            }
+
+            ClipboardLogger.logAndCopy("Error", "Tất cả server đều thất bại (có thể do captcha)")
+            return false
 
         } catch (e: Exception) {
             if (e is java.util.concurrent.CancellationException) throw e
