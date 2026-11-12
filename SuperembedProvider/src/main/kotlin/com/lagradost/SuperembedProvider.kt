@@ -59,7 +59,8 @@ private val AD_DOMAINS = listOf(
     "adsco.re", "ntwkbc21.com", "ntwkbc42.com", "usrpubtrck.com", "cdn4ads.com",
     "bkkunbeurvocc.website", "enveulpwblred.space", "my.rtmark.net",
     "bdcdmyzacrjkh.space", "acscdn.com", "aclib.net", "createlouisville.org",
-    "workdeadlinededicate.com", "protrafficinspector.com", "push-sdk.com", "portalfluently.com"
+    "workdeadlinededicate.com", "protrafficinspector.com", "push-sdk.com", "portalfluently.com",
+    "animalbiology.space"
 )
 
 // =====================================================================================
@@ -263,12 +264,37 @@ class SuperembedProvider : MainAPI() {
                     var servers = org.json.JSONArray()
                     val currentServer = java.util.concurrent.atomic.AtomicReference("Default")
                     val hits = LinkedHashMap<String, SniffResult>()
+                    val popupViews = mutableListOf<WebView>()
+                    lateinit var clickJs: String
+
+                    fun destroyPopup(popup: WebView) {
+                        try {
+                            synchronized(popupViews) { popupViews.remove(popup) }
+                            popup.stopLoading()
+                            (popup.parent as? ViewGroup)?.removeView(popup)
+                            popup.destroy()
+                        } catch (_: Exception) {}
+                    }
+
+                    fun closePopups() {
+                        val oldPopups = synchronized(popupViews) {
+                            popupViews.toList().also { popupViews.clear() }
+                        }
+                        oldPopups.forEach { popup ->
+                            try {
+                                popup.stopLoading()
+                                (popup.parent as? ViewGroup)?.removeView(popup)
+                                popup.destroy()
+                            } catch (_: Exception) {}
+                        }
+                    }
 
                     fun finish() {
                         if (finished) return
                         finished = true
                         handler.removeCallbacksAndMessages(null)
                         val found = synchronized(hits) { hits.values.toList() }
+                        closePopups()
                         try {
                             wv.stopLoading()
                             (wv.parent as? ViewGroup)?.removeView(wv)
@@ -276,12 +302,14 @@ class SuperembedProvider : MainAPI() {
                         } catch (_: Exception) {}
                         ClipboardLogger.logAndCopy(
                             "Sniff Complete",
-                            "Có ${found.size} link: ${found.map { it.serverName }.distinct().joinToString()}"
+                            "Có ${found.size} link. Phân loại: " +
+                                (found.groupBy { it.serverName }.map { (name, items) -> "$name=${items.size}" }
+                                    .joinToString().ifBlank { "không có" })
                         )
                         cont.resume(found)
                     }
 
-                    fun capture(url: String, headers: Map<String, String>) {
+                    fun capture(url: String, headers: Map<String, String>, source: String) {
                         val valid = Regex(
                             """(\.m3u8|\.mpd|master\.txt)(?:[?#]|$)""",
                             RegexOption.IGNORE_CASE
@@ -292,7 +320,7 @@ class SuperembedProvider : MainAPI() {
                             if (!hits.containsKey(url)) {
                                 val label = currentServer.get().ifBlank { "Default" }
                                 hits[url] = SniffResult(url, headers.toMap(), label)
-                                ClipboardLogger.logAndCopy("Sniff HIT [$label]", url.take(350))
+                                ClipboardLogger.logAndCopy("Sniff HIT [$label]", "Giai đoạn=${if (serverScanStarted) "SERVER_SCAN" else "DEFAULT_PLAYER"}; nguồn=$source; URL=${url.take(350)}")
                             }
                         }
                     }
@@ -316,46 +344,173 @@ class SuperembedProvider : MainAPI() {
                         mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                     }
 
-                    // Giữ nguyên cách xử lý popup hiện tại để không làm thay đổi luồng phát đã chạy được.
+                    // Popup player: cho phép tải trang video và bắt request của popup.
+                    // Chặn riêng domain quảng cáo, không trả response rỗng cho toàn bộ request.
                     wv.webChromeClient = object : WebChromeClient() {
                         override fun onCreateWindow(
                             view: WebView?, isDialog: Boolean,
                             isUserGesture: Boolean, resultMsg: Message?
                         ): Boolean {
                             return try {
+                                // Giới hạn tối đa 2 popup đồng thời để giảm áp lực RAM.
+                                while (synchronized(popupViews) { popupViews.size } >= 2) {
+                                    val oldest = synchronized(popupViews) { popupViews.firstOrNull() }
+                                    if (oldest != null) destroyPopup(oldest) else break
+                                }
+
                                 val popup = WebView(ctx)
-                                popup.settings.javaScriptEnabled = true
-                                popup.settings.domStorageEnabled = true
+                                popup.settings.apply {
+                                    javaScriptEnabled = true
+                                    domStorageEnabled = true
+                                    databaseEnabled = true
+                                    mediaPlaybackRequiresUserGesture = false
+                                    javaScriptCanOpenWindowsAutomatically = true
+                                    setSupportMultipleWindows(false)
+                                    mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                                }
+                                CookieManager.getInstance().setAcceptThirdPartyCookies(popup, true)
+
+                                popup.webChromeClient = WebChromeClient()
                                 popup.webViewClient = object : WebViewClient() {
-                                    override fun shouldOverrideUrlLoading(view: WebView?, url: String?) = true
-                                    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?) = true
                                     override fun shouldInterceptRequest(
                                         view: WebView?, request: WebResourceRequest?
-                                    ): WebResourceResponse {
-                                        return WebResourceResponse(
-                                            "text/plain", "utf-8",
-                                            ByteArrayInputStream(ByteArray(0))
+                                    ): WebResourceResponse? {
+                                        val url = request?.url?.toString() ?: return null
+                                        val headers = request.requestHeaders ?: emptyMap()
+
+                                        if (AD_DOMAINS.any { url.contains(it, ignoreCase = true) }) {
+                                            synchronized(seen) {
+                                                if (seen.size < 200) {
+                                                    seen.add("POPUP BLOCKED AD: ${url.take(180)}")
+                                                }
+                                            }
+                                            return WebResourceResponse(
+                                                "text/plain", "utf-8",
+                                                ByteArrayInputStream(ByteArray(0))
+                                            )
+                                        }
+
+                                        if (!junkRegex.containsMatchIn(url)) {
+                                            synchronized(seen) {
+                                                if (seen.size < 200) {
+                                                    seen.add("POPUP: ${url.take(220)}")
+                                                }
+                                            }
+                                        }
+                                        if (streamRegex.containsMatchIn(url)) {
+                                            capture(url, headers, "POPUP")
+                                        }
+                                        return null
+                                    }
+
+                                    override fun shouldOverrideUrlLoading(
+                                        view: WebView?, request: WebResourceRequest?
+                                    ): Boolean {
+                                        val url = request?.url?.toString() ?: return false
+                                        if (AD_DOMAINS.any { url.contains(it, ignoreCase = true) }) {
+                                            synchronized(seen) {
+                                                if (seen.size < 200) {
+                                                    seen.add("POPUP BLOCKED NAV: ${url.take(180)}")
+                                                }
+                                            }
+                                            return true
+                                        }
+                                        return !url.startsWith("http://") && !url.startsWith("https://")
+                                    }
+
+                                    override fun shouldOverrideUrlLoading(
+                                        view: WebView?, url: String?
+                                    ): Boolean {
+                                        val target = url ?: return false
+                                        if (AD_DOMAINS.any { target.contains(it, ignoreCase = true) }) {
+                                            synchronized(seen) {
+                                                if (seen.size < 200) {
+                                                    seen.add("POPUP BLOCKED NAV: ${target.take(180)}")
+                                                }
+                                            }
+                                            return true
+                                        }
+                                        return !target.startsWith("http://") && !target.startsWith("https://")
+                                    }
+
+                                    override fun onPageStarted(
+                                        view: WebView?, url: String?, favicon: android.graphics.Bitmap?
+                                    ) {
+                                        if (!url.isNullOrBlank()) {
+                                            synchronized(seen) {
+                                                if (seen.size < 200) {
+                                                    seen.add("POPUP PAGE: ${url.take(220)}")
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    override fun onPageFinished(view: WebView?, url: String?) {
+                                        if (finished || view !== popup) return
+                                        ClipboardLogger.logAndCopy(
+                                            "Popup player",
+                                            "Đã tải ${url?.take(250) ?: "trang popup"}; thử click player trong popup."
                                         )
+                                        handler.postDelayed({
+                                            if (!finished && synchronized(popupViews) { popupViews.contains(popup) }) {
+                                                try {
+                                                    popup.evaluateJavascript(clickJs, null)
+                                                    sendRealMouseClick(popup, w / 2f, h / 2f)
+                                                } catch (_: Exception) {}
+                                            }
+                                        }, 500)
+                                    }
+
+                                    override fun onReceivedError(
+                                        view: WebView?, request: WebResourceRequest?,
+                                        error: android.webkit.WebResourceError?
+                                    ) {
+                                        if (request?.isForMainFrame == true) {
+                                            ClipboardLogger.logAndCopy(
+                                                "Popup error",
+                                                "${request.url.host}: ${error?.errorCode} ${error?.description}"
+                                            )
+                                        }
                                     }
                                 }
+
+                                synchronized(popupViews) { popupViews.add(popup) }
+
+                                popup.measure(
+                                    View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
+                                    View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY)
+                                )
+                                popup.layout(0, 0, w, h)
+                                popup.translationX = -5000f
+                                try {
+                                    CommonActivity.activity?.addContentView(
+                                        popup, ViewGroup.LayoutParams(w, h)
+                                    )
+                                } catch (_: Exception) {}
+
                                 (resultMsg?.obj as? WebView.WebViewTransport)?.webView = popup
                                 resultMsg?.sendToTarget()
-                                handler.postDelayed({
-                                    try {
-                                        popup.stopLoading()
-                                        (popup.parent as? ViewGroup)?.removeView(popup)
-                                        popup.destroy()
-                                    } catch (_: Exception) {}
-                                }, 5000)
+                                ClipboardLogger.logAndCopy(
+                                    "Popup opened",
+                                    "Popup WebView được bật; request video sẽ được theo dõi."
+                                )
                                 true
-                            } catch (_: Exception) {
+                            } catch (e: Exception) {
+                                ClipboardLogger.logAndCopy(
+                                    "Popup error",
+                                    e.message ?: "Không tạo được popup WebView"
+                                )
                                 false
                             }
+                        }
+
+                        override fun onCloseWindow(window: WebView?) {
+                            if (window != null && window !== wv) destroyPopup(window)
                         }
                     }
 
                     // Giữ nguyên JavaScript và thao tác click chuột thật đã phát video thành công.
-                    val clickJs = """
+                    clickJs = """
                         (function() {
                             function fire(sel) {
                                 var els = document.querySelectorAll(sel);
@@ -388,13 +543,57 @@ class SuperembedProvider : MainAPI() {
                             var nodes = document.querySelectorAll('ul.sources-list li[data-server], .sources-list li[data-server], li[data-server]');
                             for (var i = 0; i < nodes.length; i++) {
                                 var id = nodes[i].getAttribute('data-server');
-                                var name = (nodes[i].innerText || nodes[i].textContent || '').trim().replace(/\s+/g, ' ');
+                                var title = (nodes[i].innerText || nodes[i].textContent || '').trim().replace(/\s+/g, ' ');
+                                var name = title.split(/\s+/)[0] || ('Server ' + (result.length + 1));
                                 if (id && !used[id]) {
                                     used[id] = true;
-                                    result.push({id:id, name:name || ('Server ' + (result.length + 1))});
+                                    result.push({id:id, name:name, title:title});
                                 }
                             }
                             return JSON.stringify(result);
+                        })();
+                    """.trimIndent()
+
+                    // Nhận diện server đang được chọn mặc định trước lần click đầu tiên.
+                    // Không tự suy đoán server đầu danh sách nếu trang không đánh dấu trạng thái active.
+                    val activeServerJs = """
+                        (function() {
+                            var selectors = [
+                                'ul.sources-list li[data-server].active',
+                                'ul.sources-list li[data-server].selected',
+                                'ul.sources-list li[data-server].current',
+                                'ul.sources-list li[data-server].is-active',
+                                'ul.sources-list li[data-server][aria-selected="true"]',
+                                'ul.sources-list li[data-server][aria-current="true"]',
+                                'ul.sources-list li[data-server][data-active="true"]',
+                                '.sources-list li[data-server].active',
+                                '.sources-list li[data-server].selected',
+                                '.sources-list li[data-server][aria-selected="true"]',
+                                'li[data-server].active',
+                                'li[data-server].selected',
+                                'li[data-server][aria-selected="true"]'
+                            ];
+                            var el = null;
+                            for (var i = 0; i < selectors.length && !el; i++) {
+                                try { el = document.querySelector(selectors[i]); } catch(e) {}
+                            }
+                            if (!el) {
+                                var all = document.querySelectorAll('li[data-server]');
+                                for (var j = 0; j < all.length; j++) {
+                                    var cls = (all[j].className || '').toString().toLowerCase();
+                                    if (/(^|\s)(active|selected|current|is-active)(\s|$)/.test(cls)) {
+                                        el = all[j];
+                                        break;
+                                    }
+                                }
+                            }
+                            if (!el) return '';
+                            return JSON.stringify({
+                                id: el.getAttribute('data-server') || '',
+                                name: ((el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ').split(/\s+/)[0] || ''),
+                                title: (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' '),
+                                className: (el.className || '').toString()
+                            });
                         })();
                     """.trimIndent()
 
@@ -411,6 +610,53 @@ class SuperembedProvider : MainAPI() {
                         })(
                     """.trimIndent()
 
+                    fun decodeJsString(raw: String?): String {
+                        if (raw.isNullOrBlank() || raw == "null") return ""
+                        return try {
+                            org.json.JSONObject("{\"value\":$raw}").optString("value", "")
+                        } catch (_: Exception) {
+                            raw.trim('"')
+                        }
+                    }
+
+                    fun setInitialActiveServer() {
+                        if (finished) return
+                        wv.evaluateJavascript(activeServerJs) { raw ->
+                            if (finished) return@evaluateJavascript
+                            try {
+                                val decoded = decodeJsString(raw)
+                                if (decoded.isBlank()) {
+                                    ClipboardLogger.logAndCopy(
+                                        "Default server",
+                                        "Trang không đánh dấu server active; giữ nhãn 'Default' thay vì gán nhầm."
+                                    )
+                                    return@evaluateJavascript
+                                }
+
+                                val active = org.json.JSONObject(decoded)
+                                val label = active.optString("name").trim()
+                                val id = active.optString("id")
+                                if (label.isNotBlank()) {
+                                    currentServer.set(label)
+                                    ClipboardLogger.logAndCopy(
+                                        "Default server",
+                                        "Nhận diện server đang active: $label (data-server=$id)"
+                                    )
+                                } else {
+                                    ClipboardLogger.logAndCopy(
+                                        "Default server",
+                                        "Tìm thấy active server nhưng không đọc được tên; giữ nhãn Default."
+                                    )
+                                }
+                            } catch (e: Exception) {
+                                ClipboardLogger.logAndCopy(
+                                    "Default server",
+                                    "Không đọc được trạng thái active: ${e.message ?: "parse error"}"
+                                )
+                            }
+                        }
+                    }
+
                     fun clickPlayer() {
                         if (finished) return
                         try {
@@ -421,6 +667,8 @@ class SuperembedProvider : MainAPI() {
 
                     fun scanNextServer() {
                         if (finished) return
+                        // Đóng popup của server trước khi chuyển nhãn sang server kế tiếp.
+                        closePopups()
                         if (serverIndex >= servers.length()) {
                             ClipboardLogger.logAndCopy(
                                 "Server scan",
@@ -439,19 +687,38 @@ class SuperembedProvider : MainAPI() {
 
                         val id = server.optString("id")
                         val label = server.optString("name").ifBlank { "Server $serverIndex" }
-                        currentServer.set(label)
+                        val fullTitle = server.optString("title").ifBlank { label }
+                        val previousServer = currentServer.get()
                         ClipboardLogger.logAndCopy(
                             "Server $serverIndex/${servers.length()}",
-                            "Đang thử $label"
+                            "Đang thử nguồn=$label; mô tả=$fullTitle; data-server=$id"
                         )
-                        wv.evaluateJavascript("$selectServerPrefix${org.json.JSONObject.quote(id)})", null)
+                        wv.evaluateJavascript("$selectServerPrefix${org.json.JSONObject.quote(id)})") { clicked ->
+                            val selected = clicked == "true"
+                            if (selected) {
+                                currentServer.set(label)
+                                ClipboardLogger.logAndCopy(
+                                    "Server selected [$label]",
+                                    "JavaScript tìm thấy phần tử và đã gọi click thành công."
+                                )
+                            } else {
+                                currentServer.set(previousServer)
+                                ClipboardLogger.logAndCopy(
+                                    "Server click failed [$label]",
+                                    "Không tìm thấy li[data-server] tương ứng hoặc click không được thực hiện: $clicked"
+                                )
+                            }
 
-                        // Giữ khoảng chờ 5,5 giây trước click; tiếp tục chờ 5,5 giây
-                        // để request playlist của server có thời gian xuất hiện.
-                        handler.postDelayed({
-                            clickPlayer()
-                            handler.postDelayed({ scanNextServer() }, 5500)
-                        }, 5500)
+                            // Chỉ click player sau khi xác nhận đã chọn được server.
+                            handler.postDelayed({
+                                if (selected) {
+                                    clickPlayer()
+                                    handler.postDelayed({ scanNextServer() }, 5500)
+                                } else {
+                                    handler.postDelayed({ scanNextServer() }, 1000)
+                                }
+                            }, 5500)
+                        }
                     }
 
                     fun beginServerScan() {
@@ -525,7 +792,7 @@ class SuperembedProvider : MainAPI() {
                                     if (seen.size < 200) seen.add(url.take(220))
                                 }
                             }
-                            if (streamRegex.containsMatchIn(url)) capture(url, headers)
+                            if (streamRegex.containsMatchIn(url)) capture(url, headers, "MAIN")
                             return null
                         }
 
@@ -544,8 +811,9 @@ class SuperembedProvider : MainAPI() {
                                 challengePassed = false
                                 sendRealMouseClick(wv, w / 2f, h / 2f)
                             } else if (!challengePassed) {
-                                ClipboardLogger.logAndCopy("Cloudflare", "Trang tải xong; bắt đầu click...")
+                                ClipboardLogger.logAndCopy("Cloudflare", "Trang tải xong; nhận diện server mặc định trước khi click...")
                                 challengePassed = true
+                                setInitialActiveServer()
                                 handler.postDelayed({ scheduleClick() }, 500)
                             }
                         }
@@ -644,6 +912,7 @@ class SuperembedProvider : MainAPI() {
 
     // =====================================================================================
     // LOAD LINKS
+    // ClipboardLogger.kt nằm cùng package com.lagradost; dùng trực tiếp ClipboardLogger.
     // =====================================================================================
     override suspend fun loadLinks(
         data: String, isCasting: Boolean,
@@ -706,23 +975,50 @@ class SuperembedProvider : MainAPI() {
 
                 val serverLabel = result.serverName.ifBlank { "Server" }
                 try {
-                    if (result.url.contains(".m3u8", ignoreCase = true)) {
-                        callback(newExtractorLink(this.name, serverLabel, result.url, ExtractorLinkType.M3U8) {
-                            this.referer = playerReferer
-                            this.quality = Qualities.Unknown.value
-                            this.headers = finalHeaders
-                        })
-                        emittedCount++
-                    } else {
-                        loadExtractor(result.url, playerReferer, subtitleCallback) { link ->
-                            callback(link)
-                            emittedCount++
-                        }
+                    // Xác minh link bằng cách tải nội dung playlist, không chỉ dựa vào đuôi URL.
+                    // Request dùng lại headers/cookie lấy từ WebView để giảm nguy cơ bị CDN từ chối.
+                    val playlistBody = app.get(
+                        result.url,
+                        headers = finalHeaders,
+                        referer = playerReferer
+                    ).text
+
+                    val detectedType = when {
+                        playlistBody.contains("#EXTM3U", ignoreCase = true) ->
+                            ExtractorLinkType.M3U8
+                        playlistBody.contains("<MPD", ignoreCase = true) ->
+                            ExtractorLinkType.DASH
+                        else -> null
                     }
+
+                    if (detectedType == null) {
+                        ClipboardLogger.logAndCopy(
+                            "Server skipped [$serverLabel]",
+                            "URL được bắt nhưng phản hồi không phải nội dung HLS/DASH hợp lệ."
+                        )
+                        continue
+                    }
+
+                    val quality = Regex(
+                        """(2160|1440|1080|720|480|360|240|144)p""",
+                        RegexOption.IGNORE_CASE
+                    ).find(serverLabel)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                        ?: Qualities.Unknown.value
+
+                    callback(newExtractorLink(this.name, serverLabel, result.url, detectedType) {
+                        this.referer = playerReferer
+                        this.quality = quality
+                        this.headers = finalHeaders
+                    })
+                    emittedCount++
+                    ClipboardLogger.logAndCopy(
+                        "Server accepted [$serverLabel]",
+                        "Playlist ${detectedType.name} hợp lệ; đã thêm vào CloudStream."
+                    )
                 } catch (e: Exception) {
                     ClipboardLogger.logAndCopy(
                         "Server skipped [$serverLabel]",
-                        "Không xử lý được link: ${e.message ?: "unknown"}"
+                        "Không xác minh/xử lý được link: ${e.message ?: "unknown"}"
                     )
                 }
             }
