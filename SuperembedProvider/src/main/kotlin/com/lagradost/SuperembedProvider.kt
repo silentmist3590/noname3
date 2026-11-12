@@ -46,7 +46,7 @@ private fun parseRef(s: String): Ref? {
     return Ref(m.groupValues[1], id, m.groupValues[3].toIntOrNull(), m.groupValues[4].toIntOrNull())
 }
 
-private data class SniffResult(val url: String, val headers: Map<String, String>, val serverName: String)
+private data class SniffResult(val url: String, val headers: Map<String, String>)
 
 // Danh sách đen các domain quảng cáo (từ log thực tế)
 private val AD_DOMAINS = listOf(
@@ -59,8 +59,7 @@ private val AD_DOMAINS = listOf(
     "adsco.re", "ntwkbc21.com", "ntwkbc42.com", "usrpubtrck.com", "cdn4ads.com",
     "bkkunbeurvocc.website", "enveulpwblred.space", "my.rtmark.net",
     "bdcdmyzacrjkh.space", "acscdn.com", "aclib.net", "createlouisville.org",
-    "workdeadlinededicate.com", "protrafficinspector.com", "push-sdk.com", "portalfluently.com",
-    "animalbiology.space"
+    "workdeadlinededicate.com", "protrafficinspector.com", "push-sdk.com", "portalfluently.com"
 )
 
 // =====================================================================================
@@ -241,14 +240,14 @@ class SuperembedProvider : MainAPI() {
         referer: String,
         ua: String,
         seen: MutableList<String>
-    ): List<SniffResult> {
+    ): SniffResult? {
         return suspendCoroutine { cont ->
             val handler = Handler(Looper.getMainLooper())
             handler.post {
                 val ctx: Context? = CommonActivity.activity
                 if (ctx == null) {
                     ClipboardLogger.logAndCopy("Sniff Error", "Không có Context")
-                    cont.resume(emptyList())
+                    cont.resume(null)
                     return@post
                 }
 
@@ -257,80 +256,23 @@ class SuperembedProvider : MainAPI() {
                     val h = 1920
                     val wv = WebView(ctx)
                     var finished = false
-                    var challengePassed = false
-                    var clickCount = 0
-                    var serverScanStarted = false
-                    var serverIndex = 0
-                    var servers = org.json.JSONArray()
-                    val currentServer = java.util.concurrent.atomic.AtomicReference("Default")
-                    val hits = LinkedHashMap<String, SniffResult>()
-                    val popupViews = mutableListOf<WebView>()
-                    lateinit var clickJs: String
+                    var isChallengePassed = false
+                    var popupCount = 0
 
-                    fun destroyPopup(popup: WebView) {
-                        try {
-                            synchronized(popupViews) { popupViews.remove(popup) }
-                            popup.stopLoading()
-                            (popup.parent as? ViewGroup)?.removeView(popup)
-                            popup.destroy()
-                        } catch (_: Exception) {}
-                    }
-
-                    fun closePopups() {
-                        val oldPopups = synchronized(popupViews) {
-                            popupViews.toList().also { popupViews.clear() }
-                        }
-                        oldPopups.forEach { popup ->
-                            try {
-                                popup.stopLoading()
-                                (popup.parent as? ViewGroup)?.removeView(popup)
-                                popup.destroy()
-                            } catch (_: Exception) {}
-                        }
-                    }
-
-                    fun finish() {
+                    fun finish(res: SniffResult?) {
                         if (finished) return
                         finished = true
                         handler.removeCallbacksAndMessages(null)
-                        val found = synchronized(hits) { hits.values.toList() }
-                        closePopups()
                         try {
                             wv.stopLoading()
                             (wv.parent as? ViewGroup)?.removeView(wv)
                             wv.destroy()
                         } catch (_: Exception) {}
-                        ClipboardLogger.logAndCopy(
-                            "Sniff Complete",
-                            "Có ${found.size} link: ${found.map { it.serverName }.distinct().joinToString()}"
-                        )
-                        cont.resume(found)
+                        cont.resume(res)
                     }
 
-                    fun capture(url: String, headers: Map<String, String>, source: String) {
-                        val valid = Regex(
-                            """(\.m3u8|\.mpd|master\.txt)(?:[?#]|$)""",
-                            RegexOption.IGNORE_CASE
-                        ).containsMatchIn(url)
-                        if (!valid || (!url.startsWith("http://") && !url.startsWith("https://"))) return
-                        if (url.contains("/embed/iframe_player/", ignoreCase = true)) return
-                        synchronized(hits) {
-                            if (!hits.containsKey(url)) {
-                                val label = currentServer.get().ifBlank { "Default" }
-                                hits[url] = SniffResult(url, headers.toMap(), label)
-                                ClipboardLogger.logAndCopy("Sniff HIT [$label]", "[$source] ${url.take(350)}")
-                            }
-                        }
-                    }
-
-                    val streamRegex = Regex(
-                        """(\.m3u8|\.mpd|master\.txt)(?:[?#]|$)""",
-                        RegexOption.IGNORE_CASE
-                    )
-                    val junkRegex = Regex(
-                        """\.(css|png|jpe?g|gif|svg|ico|woff2?|ttf)(\?|$)""",
-                        RegexOption.IGNORE_CASE
-                    )
+                    val streamRegex = Regex("""\.m3u8|\.mpd|master\.txt""", RegexOption.IGNORE_CASE)
+                    val junkRegex = Regex("""\.(css|png|jpe?g|gif|svg|ico|woff2?|ttf)(\?|$)""", RegexOption.IGNORE_CASE)
 
                     wv.settings.apply {
                         javaScriptEnabled = true
@@ -342,173 +284,36 @@ class SuperembedProvider : MainAPI() {
                         mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                     }
 
-                    // Popup player: cho phép tải trang video và bắt request của popup.
-                    // Chặn riêng domain quảng cáo, không trả response rỗng cho toàn bộ request.
+                    // Popup đóng sau 5 giây
                     wv.webChromeClient = object : WebChromeClient() {
                         override fun onCreateWindow(
                             view: WebView?, isDialog: Boolean,
                             isUserGesture: Boolean, resultMsg: Message?
                         ): Boolean {
-                            return try {
-                                // Giới hạn tối đa 2 popup đồng thời để giảm áp lực RAM.
-                                while (synchronized(popupViews) { popupViews.size } >= 2) {
-                                    val oldest = synchronized(popupViews) { popupViews.firstOrNull() }
-                                    if (oldest != null) destroyPopup(oldest) else break
-                                }
-
+                            try {
+                                popupCount++
+                                ClipboardLogger.logAndCopy("Popup #$popupCount", "Mở, đóng sau 5s")
                                 val popup = WebView(ctx)
-                                popup.settings.apply {
-                                    javaScriptEnabled = true
-                                    domStorageEnabled = true
-                                    databaseEnabled = true
-                                    mediaPlaybackRequiresUserGesture = false
-                                    javaScriptCanOpenWindowsAutomatically = true
-                                    setSupportMultipleWindows(false)
-                                    mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                                }
-                                CookieManager.getInstance().setAcceptThirdPartyCookies(popup, true)
-
-                                popup.webChromeClient = WebChromeClient()
+                                popup.settings.apply { javaScriptEnabled = true; domStorageEnabled = true }
                                 popup.webViewClient = object : WebViewClient() {
-                                    override fun shouldInterceptRequest(
-                                        view: WebView?, request: WebResourceRequest?
-                                    ): WebResourceResponse? {
-                                        val url = request?.url?.toString() ?: return null
-                                        val headers = request.requestHeaders ?: emptyMap()
-
-                                        if (AD_DOMAINS.any { url.contains(it, ignoreCase = true) }) {
-                                            synchronized(seen) {
-                                                if (seen.size < 200) {
-                                                    seen.add("POPUP BLOCKED AD: ${url.take(180)}")
-                                                }
-                                            }
-                                            return WebResourceResponse(
-                                                "text/plain", "utf-8",
-                                                ByteArrayInputStream(ByteArray(0))
-                                            )
-                                        }
-
-                                        if (!junkRegex.containsMatchIn(url)) {
-                                            synchronized(seen) {
-                                                if (seen.size < 200) {
-                                                    seen.add("POPUP: ${url.take(220)}")
-                                                }
-                                            }
-                                        }
-                                        if (streamRegex.containsMatchIn(url)) {
-                                            capture(url, headers, "POPUP")
-                                        }
-                                        return null
-                                    }
-
-                                    override fun shouldOverrideUrlLoading(
-                                        view: WebView?, request: WebResourceRequest?
-                                    ): Boolean {
-                                        val url = request?.url?.toString() ?: return false
-                                        if (AD_DOMAINS.any { url.contains(it, ignoreCase = true) }) {
-                                            synchronized(seen) {
-                                                if (seen.size < 200) {
-                                                    seen.add("POPUP BLOCKED NAV: ${url.take(180)}")
-                                                }
-                                            }
-                                            return true
-                                        }
-                                        return !url.startsWith("http://") && !url.startsWith("https://")
-                                    }
-
-                                    override fun shouldOverrideUrlLoading(
-                                        view: WebView?, url: String?
-                                    ): Boolean {
-                                        val target = url ?: return false
-                                        if (AD_DOMAINS.any { target.contains(it, ignoreCase = true) }) {
-                                            synchronized(seen) {
-                                                if (seen.size < 200) {
-                                                    seen.add("POPUP BLOCKED NAV: ${target.take(180)}")
-                                                }
-                                            }
-                                            return true
-                                        }
-                                        return !target.startsWith("http://") && !target.startsWith("https://")
-                                    }
-
-                                    override fun onPageStarted(
-                                        view: WebView?, url: String?, favicon: android.graphics.Bitmap?
-                                    ) {
-                                        if (!url.isNullOrBlank()) {
-                                            synchronized(seen) {
-                                                if (seen.size < 200) {
-                                                    seen.add("POPUP PAGE: ${url.take(220)}")
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    override fun onPageFinished(view: WebView?, url: String?) {
-                                        if (finished || view !== popup) return
-                                        ClipboardLogger.logAndCopy(
-                                            "Popup player",
-                                            "Đã tải ${url?.take(250) ?: "trang popup"}; thử click player trong popup."
-                                        )
-                                        handler.postDelayed({
-                                            if (!finished && synchronized(popupViews) { popupViews.contains(popup) }) {
-                                                try {
-                                                    popup.evaluateJavascript(clickJs, null)
-                                                    sendRealMouseClick(popup, w / 2f, h / 2f)
-                                                } catch (_: Exception) {}
-                                            }
-                                        }, 500)
-                                    }
-
-                                    override fun onReceivedError(
-                                        view: WebView?, request: WebResourceRequest?,
-                                        error: android.webkit.WebResourceError?
-                                    ) {
-                                        if (request?.isForMainFrame == true) {
-                                            ClipboardLogger.logAndCopy(
-                                                "Popup error",
-                                                "${request.url.host}: ${error?.errorCode} ${error?.description}"
-                                            )
-                                        }
+                                    override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean = true
+                                    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = true
+                                    override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                                        return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream("".toByteArray()))
                                     }
                                 }
-
-                                synchronized(popupViews) { popupViews.add(popup) }
-
-                                popup.measure(
-                                    View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
-                                    View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY)
-                                )
-                                popup.layout(0, 0, w, h)
-                                popup.translationX = -5000f
-                                try {
-                                    CommonActivity.activity?.addContentView(
-                                        popup, ViewGroup.LayoutParams(w, h)
-                                    )
-                                } catch (_: Exception) {}
-
-                                (resultMsg?.obj as? WebView.WebViewTransport)?.webView = popup
+                                val transport = resultMsg?.obj as? WebView.WebViewTransport
+                                transport?.webView = popup
                                 resultMsg?.sendToTarget()
-                                ClipboardLogger.logAndCopy(
-                                    "Popup opened",
-                                    "Popup WebView được bật; request video sẽ được theo dõi."
-                                )
-                                true
-                            } catch (e: Exception) {
-                                ClipboardLogger.logAndCopy(
-                                    "Popup error",
-                                    e.message ?: "Không tạo được popup WebView"
-                                )
-                                false
-                            }
-                        }
-
-                        override fun onCloseWindow(window: WebView?) {
-                            if (window != null && window !== wv) destroyPopup(window)
+                                handler.postDelayed({
+                                    try { popup.stopLoading(); popup.destroy() } catch (_: Exception) {}
+                                }, 5000)
+                                return true
+                            } catch (e: Exception) { return false }
                         }
                     }
 
-                    // Giữ nguyên JavaScript và thao tác click chuột thật đã phát video thành công.
-                    clickJs = """
+                    val clickJs = """
                         (function() {
                             function fire(sel) {
                                 var els = document.querySelectorAll(sel);
@@ -534,191 +339,74 @@ class SuperembedProvider : MainAPI() {
                         })();
                     """.trimIndent()
 
-                    // Selector dựa trên cấu trúc danh sách server đã quan sát: li[data-server].
-                    val listServersJs = """
-                        (function() {
-                            var result = [], used = {};
-                            var nodes = document.querySelectorAll('ul.sources-list li[data-server], .sources-list li[data-server], li[data-server]');
-                            for (var i = 0; i < nodes.length; i++) {
-                                var id = nodes[i].getAttribute('data-server');
-                                var name = (nodes[i].innerText || nodes[i].textContent || '').trim().replace(/\s+/g, ' ');
-                                if (id && !used[id]) {
-                                    used[id] = true;
-                                    result.push({id:id, name:name || ('Server ' + (result.length + 1))});
-                                }
-                            }
-                            return JSON.stringify(result);
-                        })();
-                    """.trimIndent()
-
-                    val selectServerPrefix = """
-                        (function(id) {
-                            var nodes = document.querySelectorAll('ul.sources-list li[data-server], .sources-list li[data-server], li[data-server]');
-                            for (var i = 0; i < nodes.length; i++) {
-                                if (nodes[i].getAttribute('data-server') === id) {
-                                    try { nodes[i].click(); } catch(e) {}
-                                    return true;
-                                }
-                            }
-                            return false;
-                        })(
-                    """.trimIndent()
-
-                    fun clickPlayer() {
-                        if (finished) return
-                        try {
-                            wv.evaluateJavascript(clickJs, null)
-                            sendRealMouseClick(wv, w / 2f, h / 2f)
-                        } catch (_: Exception) {}
-                    }
-
-                    fun scanNextServer() {
-                        if (finished) return
-                        // Đóng popup của server trước khi chuyển nhãn sang server kế tiếp.
-                        closePopups()
-                        if (serverIndex >= servers.length()) {
-                            ClipboardLogger.logAndCopy(
-                                "Server scan",
-                                "Đã thử ${servers.length()} server; đợi thêm 8 giây."
-                            )
-                            handler.postDelayed({ finish() }, 8000)
-                            return
-                        }
-
-                        val server = servers.optJSONObject(serverIndex)
-                        serverIndex++
-                        if (server == null) {
-                            handler.postDelayed({ scanNextServer() }, 500)
-                            return
-                        }
-
-                        val id = server.optString("id")
-                        val label = server.optString("name").ifBlank { "Server $serverIndex" }
-                        currentServer.set(label)
-                        ClipboardLogger.logAndCopy(
-                            "Server $serverIndex/${servers.length()}",
-                            "Đang thử $label"
-                        )
-                        wv.evaluateJavascript("$selectServerPrefix${org.json.JSONObject.quote(id)})") { clicked ->
-                            ClipboardLogger.logAndCopy(
-                                "Server click [$label]",
-                                "Tìm thấy phần tử và đã gọi click: $clicked"
-                            )
-                        }
-
-                        // Giữ khoảng chờ 5,5 giây trước click; tiếp tục chờ 5,5 giây
-                        // để request playlist của server có thời gian xuất hiện.
-                        handler.postDelayed({
-                            clickPlayer()
-                            handler.postDelayed({ scanNextServer() }, 5500)
-                        }, 5500)
-                    }
-
-                    fun beginServerScan() {
-                        if (finished || serverScanStarted) return
-                        serverScanStarted = true
-                        wv.evaluateJavascript(listServersJs) { raw ->
-                            if (!finished) {
-                                try {
-                                    val decoded = if (raw.isNullOrBlank() || raw == "null") "[]" else
-                                        org.json.JSONObject("{\"v\":$raw}").optString("v", "[]")
-                                    servers = org.json.JSONArray(decoded)
-                                    ClipboardLogger.logAndCopy("Server scan", "Tìm thấy ${servers.length()} server.")
-                                    if (servers.length() == 0) {
-                                        handler.postDelayed({ finish() }, 8000)
-                                    } else {
-                                        scanNextServer()
-                                    }
-                                } catch (e: Exception) {
-                                    ClipboardLogger.logAndCopy("Server parse", e.message ?: "Parse lỗi")
-                                    handler.postDelayed({ finish() }, 8000)
-                                }
-                            }
-                        }
-                    }
-
+                    var clickCount = 0
                     fun scheduleClick() {
                         if (finished) return
-                        if (!challengePassed) {
+                        if (!isChallengePassed) {
                             handler.postDelayed({ scheduleClick() }, 1000)
                             return
                         }
                         clickCount++
-                        clickPlayer()
-                        ClipboardLogger.logAndCopy("Click #$clickCount", "Mouse click, chờ 5.5s")
+                        try {
+                            wv.evaluateJavascript(clickJs, null)
+                            // ⭐ CLICK CHUỘT THẬT
+                            sendRealMouseClick(wv, w / 2f, h / 2f)
+                            ClipboardLogger.logAndCopy("Click #$clickCount", "Mouse click, chờ 5.5s")
+                        } catch (_: Exception) {}
                         if (clickCount < 6) {
                             handler.postDelayed({ scheduleClick() }, 5500)
                         } else {
-                            ClipboardLogger.logAndCopy(
-                                "Click",
-                                "Đã click 6 lần, chờ thêm 8s trước khi quét server..."
-                            )
-                            handler.postDelayed({ beginServerScan() }, 8000)
+                            ClipboardLogger.logAndCopy("Click", "Đã click 6 lần, chờ thêm 8s...")
+                            handler.postDelayed({ finish(null) }, 8000)
                         }
                     }
 
                     wv.webViewClient = object : WebViewClient() {
-                        override fun onPageStarted(
-                            view: WebView?, url: String?, favicon: android.graphics.Bitmap?
-                        ) {
-                            if (url?.contains("challenges.cloudflare.com") == true ||
-                                url?.contains("turnstile") == true
-                            ) challengePassed = false
+                        override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                            if (url?.contains("challenges.cloudflare.com") == true || url?.contains("turnstile") == true) {
+                                isChallengePassed = false
+                            }
                         }
 
-                        override fun shouldInterceptRequest(
-                            view: WebView?, request: WebResourceRequest?
-                        ): WebResourceResponse? {
-                            val url = request?.url?.toString() ?: return null
-                            val headers = request.requestHeaders ?: emptyMap()
-                            if (AD_DOMAINS.any { url.contains(it, ignoreCase = true) }) {
-                                synchronized(seen) {
-                                    if (seen.size < 200) seen.add("BLOCKED AD: " + url.take(100))
-                                }
-                                return WebResourceResponse(
-                                    "text/plain", "utf-8",
-                                    ByteArrayInputStream(ByteArray(0))
-                                )
+                        override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                            val u = request?.url?.toString() ?: return null
+                            val reqHeaders = request?.requestHeaders ?: emptyMap()
+                            if (AD_DOMAINS.any { u.contains(it, ignoreCase = true) }) {
+                                seen.add("BLOCKED AD: " + u.take(100))
+                                return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream("".toByteArray()))
                             }
-                            if (!junkRegex.containsMatchIn(url)) {
-                                synchronized(seen) {
-                                    if (seen.size < 200) seen.add(url.take(220))
-                                }
+                            if (!junkRegex.containsMatchIn(u) && seen.size < 200) seen.add(u.take(220))
+                            if (streamRegex.containsMatchIn(u) && !u.contains("/embed/iframe_player/")) {
+                                val hit = SniffResult(u, reqHeaders)
+                                ClipboardLogger.logAndCopy("Sniff HIT", "URL: $u")
+                                handler.post { finish(hit) }
                             }
-                            if (streamRegex.containsMatchIn(url)) capture(url, headers, "MAIN")
                             return null
                         }
 
-                        override fun shouldOverrideUrlLoading(
-                            view: WebView?, request: WebResourceRequest?
-                        ): Boolean {
-                            val url = request?.url?.toString() ?: return false
-                            if (AD_DOMAINS.any { url.contains(it, ignoreCase = true) }) return true
-                            return !url.startsWith("http://") && !url.startsWith("https://")
+                        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                            val u = request?.url?.toString() ?: return false
+                            if (AD_DOMAINS.any { u.contains(it, ignoreCase = true) }) return true
+                            if (!u.startsWith("http://") && !u.startsWith("https://")) return true
+                            return false
                         }
 
                         override fun onPageFinished(view: WebView?, url: String?) {
-                            if (url?.contains("challenges.cloudflare.com") == true ||
-                                url?.contains("turnstile") == true
-                            ) {
-                                challengePassed = false
+                            if (url?.contains("challenges.cloudflare.com") == true || url?.contains("turnstile") == true) {
+                                isChallengePassed = false
                                 sendRealMouseClick(wv, w / 2f, h / 2f)
-                            } else if (!challengePassed) {
-                                ClipboardLogger.logAndCopy("Cloudflare", "Trang tải xong; bắt đầu click...")
-                                challengePassed = true
-                                handler.postDelayed({ scheduleClick() }, 500)
+                            } else {
+                                if (!isChallengePassed) {
+                                    ClipboardLogger.logAndCopy("Cloudflare", "Đã vượt qua! Bắt đầu click...")
+                                    isChallengePassed = true
+                                    handler.postDelayed({ scheduleClick() }, 500)
+                                }
                             }
                         }
 
-                        override fun onReceivedError(
-                            view: WebView?, request: WebResourceRequest?,
-                            error: android.webkit.WebResourceError?
-                        ) {
+                        override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: android.webkit.WebResourceError?) {
                             if (request?.isForMainFrame == true) {
-                                ClipboardLogger.logAndCopy(
-                                    "WebView Error",
-                                    "${request.url.host}: ${error?.errorCode} ${error?.description}"
-                                )
+                                ClipboardLogger.logAndCopy("WebView Error", "${request.url.host}: ${error?.errorCode} ${error?.description}")
                             }
                         }
                     }
@@ -729,16 +417,14 @@ class SuperembedProvider : MainAPI() {
                     )
                     wv.layout(0, 0, w, h)
                     wv.translationX = -4000f
-                    try {
-                        CommonActivity.activity?.addContentView(wv, ViewGroup.LayoutParams(w, h))
-                    } catch (_: Exception) {}
+                    try { CommonActivity.activity?.addContentView(wv, ViewGroup.LayoutParams(w, h)) } catch (_: Exception) {}
 
-                    // Timeout đủ cho lượt click gốc và thử tuần tự các server.
-                    handler.postDelayed({ finish() }, 180_000L)
+                    handler.postDelayed({ finish(null) }, 120_000L)
                     wv.loadUrl(pageUrl, mapOf("Referer" to referer))
+
                 } catch (e: Exception) {
                     ClipboardLogger.logAndCopy("Sniff Exception", e.stackTraceToString().take(800))
-                    cont.resume(emptyList())
+                    cont.resume(null)
                 }
             }
         }
@@ -804,7 +490,6 @@ class SuperembedProvider : MainAPI() {
 
     // =====================================================================================
     // LOAD LINKS
-    // ClipboardLogger.kt nằm cùng package com.lagradost; dùng trực tiếp ClipboardLogger.
     // =====================================================================================
     override suspend fun loadLinks(
         data: String, isCasting: Boolean,
@@ -840,86 +525,41 @@ class SuperembedProvider : MainAPI() {
 
             ClipboardLogger.logAndCopy("WebView", "Tải: $embedUrl")
             val seen = mutableListOf<String>()
-            val results = sniffStream(embedUrl, fakeReferer, ua, seen)
+            val result = sniffStream(embedUrl, fakeReferer, ua, seen)
 
-            if (results.isEmpty()) {
-                ClipboardLogger.logAndCopy(
-                    "Error",
-                    "Không bắt được link video hoạt động.\nSeen cuối:\n${seen.takeLast(10).joinToString("\n")}"
-                )
+            if (result == null) {
+                ClipboardLogger.logAndCopy("Error", "Không bắt được link.\nSeen cuối:\n${seen.takeLast(10).joinToString("\n")}")
                 return false
             }
 
             val playerReferer = "https://streamingnow.mov/"
-            val emittedUrls = mutableSetOf<String>()
-            var emittedCount = 0
+            val cookie = CookieManager.getInstance().getCookie(result.url) ?: ""
 
-            for (result in results) {
-                if (!emittedUrls.add(result.url)) continue
-
-                val cookie = CookieManager.getInstance().getCookie(result.url) ?: ""
-                val finalHeaders = result.headers.toMutableMap().apply {
-                    put("User-Agent", ua)
-                    put("Referer", playerReferer)
-                    put("Origin", "https://streamingnow.mov")
-                    if (cookie.isNotEmpty()) put("Cookie", cookie)
-                }
-
-                val serverLabel = result.serverName.ifBlank { "Server" }
-                try {
-                    // Xác minh link bằng cách tải nội dung playlist, không chỉ dựa vào đuôi URL.
-                    // Request dùng lại headers/cookie lấy từ WebView để giảm nguy cơ bị CDN từ chối.
-                    val playlistBody = app.get(
-                        result.url,
-                        headers = finalHeaders,
-                        referer = playerReferer
-                    ).text
-
-                    val detectedType = when {
-                        playlistBody.contains("#EXTM3U", ignoreCase = true) ->
-                            ExtractorLinkType.M3U8
-                        playlistBody.contains("<MPD", ignoreCase = true) ->
-                            ExtractorLinkType.DASH
-                        else -> null
-                    }
-
-                    if (detectedType == null) {
-                        ClipboardLogger.logAndCopy(
-                            "Server skipped [$serverLabel]",
-                            "URL được bắt nhưng phản hồi không phải nội dung HLS/DASH hợp lệ."
-                        )
-                        continue
-                    }
-
-                    val quality = Regex(
-                        """(2160|1440|1080|720|480|360|240|144)p""",
-                        RegexOption.IGNORE_CASE
-                    ).find(serverLabel)?.groupValues?.getOrNull(1)?.toIntOrNull()
-                        ?: Qualities.Unknown.value
-
-                    callback(newExtractorLink(this.name, serverLabel, result.url, detectedType) {
-                        this.referer = playerReferer
-                        this.quality = quality
-                        this.headers = finalHeaders
-                    })
-                    emittedCount++
-                    ClipboardLogger.logAndCopy(
-                        "Server accepted [$serverLabel]",
-                        "Playlist ${detectedType.name} hợp lệ; đã thêm vào CloudStream."
-                    )
-                } catch (e: Exception) {
-                    ClipboardLogger.logAndCopy(
-                        "Server skipped [$serverLabel]",
-                        "Không xác minh/xử lý được link: ${e.message ?: "unknown"}"
-                    )
-                }
+            val finalHeaders = result.headers.toMutableMap().apply {
+                put("User-Agent", ua)
+                put("Referer", playerReferer)
+                put("Origin", "https://streamingnow.mov")
+                if (cookie.isNotEmpty()) put("Cookie", cookie)
             }
 
-            ClipboardLogger.logAndCopy(
-                "LoadLinks result",
-                "Bắt được ${results.size} URL; đã gửi $emittedCount link cho CloudStream."
-            )
-            return emittedCount > 0
+            if (result.url.contains(".m3u8")) {
+                callback(newExtractorLink(this.name, "MultiEmbed", result.url, ExtractorLinkType.M3U8) {
+                    this.referer = playerReferer
+                    this.quality = Qualities.P1080.value
+                    this.headers = finalHeaders
+                })
+            } else {
+                try {
+                    loadExtractor(result.url, playerReferer, subtitleCallback, callback)
+                } catch (e: Exception) {
+                    callback(newExtractorLink(this.name, "MultiEmbed", result.url, ExtractorLinkType.M3U8) {
+                        this.referer = playerReferer
+                        this.quality = Qualities.Unknown.value
+                        this.headers = finalHeaders
+                    })
+                }
+            }
+            return true
         } catch (e: Exception) {
             if (e is java.util.concurrent.CancellationException) throw e
             ClipboardLogger.logAndCopy("Exception", "Error: ${e.message}\nStackTrace: ${e.stackTraceToString().take(1500)}")
