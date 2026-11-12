@@ -302,9 +302,7 @@ class SuperembedProvider : MainAPI() {
                         } catch (_: Exception) {}
                         ClipboardLogger.logAndCopy(
                             "Sniff Complete",
-                            "Có ${found.size} link. Phân loại: " +
-                                (found.groupBy { it.serverName }.map { (name, items) -> "$name=${items.size}" }
-                                    .joinToString().ifBlank { "không có" })
+                            "Có ${found.size} link: ${found.map { it.serverName }.distinct().joinToString()}"
                         )
                         cont.resume(found)
                     }
@@ -320,7 +318,7 @@ class SuperembedProvider : MainAPI() {
                             if (!hits.containsKey(url)) {
                                 val label = currentServer.get().ifBlank { "Default" }
                                 hits[url] = SniffResult(url, headers.toMap(), label)
-                                ClipboardLogger.logAndCopy("Sniff HIT [$label]", "Giai đoạn=${if (serverScanStarted) "SERVER_SCAN" else "DEFAULT_PLAYER"}; nguồn=$source; URL=${url.take(350)}")
+                                ClipboardLogger.logAndCopy("Sniff HIT [$label]", "[$source] ${url.take(350)}")
                             }
                         }
                     }
@@ -543,57 +541,13 @@ class SuperembedProvider : MainAPI() {
                             var nodes = document.querySelectorAll('ul.sources-list li[data-server], .sources-list li[data-server], li[data-server]');
                             for (var i = 0; i < nodes.length; i++) {
                                 var id = nodes[i].getAttribute('data-server');
-                                var title = (nodes[i].innerText || nodes[i].textContent || '').trim().replace(/\s+/g, ' ');
-                                var name = title.split(/\s+/)[0] || ('Server ' + (result.length + 1));
+                                var name = (nodes[i].innerText || nodes[i].textContent || '').trim().replace(/\s+/g, ' ');
                                 if (id && !used[id]) {
                                     used[id] = true;
-                                    result.push({id:id, name:name, title:title});
+                                    result.push({id:id, name:name || ('Server ' + (result.length + 1))});
                                 }
                             }
                             return JSON.stringify(result);
-                        })();
-                    """.trimIndent()
-
-                    // Nhận diện server đang được chọn mặc định trước lần click đầu tiên.
-                    // Không tự suy đoán server đầu danh sách nếu trang không đánh dấu trạng thái active.
-                    val activeServerJs = """
-                        (function() {
-                            var selectors = [
-                                'ul.sources-list li[data-server].active',
-                                'ul.sources-list li[data-server].selected',
-                                'ul.sources-list li[data-server].current',
-                                'ul.sources-list li[data-server].is-active',
-                                'ul.sources-list li[data-server][aria-selected="true"]',
-                                'ul.sources-list li[data-server][aria-current="true"]',
-                                'ul.sources-list li[data-server][data-active="true"]',
-                                '.sources-list li[data-server].active',
-                                '.sources-list li[data-server].selected',
-                                '.sources-list li[data-server][aria-selected="true"]',
-                                'li[data-server].active',
-                                'li[data-server].selected',
-                                'li[data-server][aria-selected="true"]'
-                            ];
-                            var el = null;
-                            for (var i = 0; i < selectors.length && !el; i++) {
-                                try { el = document.querySelector(selectors[i]); } catch(e) {}
-                            }
-                            if (!el) {
-                                var all = document.querySelectorAll('li[data-server]');
-                                for (var j = 0; j < all.length; j++) {
-                                    var cls = (all[j].className || '').toString().toLowerCase();
-                                    if (/(^|\s)(active|selected|current|is-active)(\s|$)/.test(cls)) {
-                                        el = all[j];
-                                        break;
-                                    }
-                                }
-                            }
-                            if (!el) return '';
-                            return JSON.stringify({
-                                id: el.getAttribute('data-server') || '',
-                                name: ((el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ').split(/\s+/)[0] || ''),
-                                title: (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' '),
-                                className: (el.className || '').toString()
-                            });
                         })();
                     """.trimIndent()
 
@@ -609,53 +563,6 @@ class SuperembedProvider : MainAPI() {
                             return false;
                         })(
                     """.trimIndent()
-
-                    fun decodeJsString(raw: String?): String {
-                        if (raw.isNullOrBlank() || raw == "null") return ""
-                        return try {
-                            org.json.JSONObject("{\"value\":$raw}").optString("value", "")
-                        } catch (_: Exception) {
-                            raw.trim('"')
-                        }
-                    }
-
-                    fun setInitialActiveServer() {
-                        if (finished) return
-                        wv.evaluateJavascript(activeServerJs) { raw ->
-                            if (finished) return@evaluateJavascript
-                            try {
-                                val decoded = decodeJsString(raw)
-                                if (decoded.isBlank()) {
-                                    ClipboardLogger.logAndCopy(
-                                        "Default server",
-                                        "Trang không đánh dấu server active; giữ nhãn 'Default' thay vì gán nhầm."
-                                    )
-                                    return@evaluateJavascript
-                                }
-
-                                val active = org.json.JSONObject(decoded)
-                                val label = active.optString("name").trim()
-                                val id = active.optString("id")
-                                if (label.isNotBlank()) {
-                                    currentServer.set(label)
-                                    ClipboardLogger.logAndCopy(
-                                        "Default server",
-                                        "Nhận diện server đang active: $label (data-server=$id)"
-                                    )
-                                } else {
-                                    ClipboardLogger.logAndCopy(
-                                        "Default server",
-                                        "Tìm thấy active server nhưng không đọc được tên; giữ nhãn Default."
-                                    )
-                                }
-                            } catch (e: Exception) {
-                                ClipboardLogger.logAndCopy(
-                                    "Default server",
-                                    "Không đọc được trạng thái active: ${e.message ?: "parse error"}"
-                                )
-                            }
-                        }
-                    }
 
                     fun clickPlayer() {
                         if (finished) return
@@ -687,38 +594,24 @@ class SuperembedProvider : MainAPI() {
 
                         val id = server.optString("id")
                         val label = server.optString("name").ifBlank { "Server $serverIndex" }
-                        val fullTitle = server.optString("title").ifBlank { label }
-                        val previousServer = currentServer.get()
+                        currentServer.set(label)
                         ClipboardLogger.logAndCopy(
                             "Server $serverIndex/${servers.length()}",
-                            "Đang thử nguồn=$label; mô tả=$fullTitle; data-server=$id"
+                            "Đang thử $label"
                         )
                         wv.evaluateJavascript("$selectServerPrefix${org.json.JSONObject.quote(id)})") { clicked ->
-                            val selected = clicked == "true"
-                            if (selected) {
-                                currentServer.set(label)
-                                ClipboardLogger.logAndCopy(
-                                    "Server selected [$label]",
-                                    "JavaScript tìm thấy phần tử và đã gọi click thành công."
-                                )
-                            } else {
-                                currentServer.set(previousServer)
-                                ClipboardLogger.logAndCopy(
-                                    "Server click failed [$label]",
-                                    "Không tìm thấy li[data-server] tương ứng hoặc click không được thực hiện: $clicked"
-                                )
-                            }
-
-                            // Chỉ click player sau khi xác nhận đã chọn được server.
-                            handler.postDelayed({
-                                if (selected) {
-                                    clickPlayer()
-                                    handler.postDelayed({ scanNextServer() }, 5500)
-                                } else {
-                                    handler.postDelayed({ scanNextServer() }, 1000)
-                                }
-                            }, 5500)
+                            ClipboardLogger.logAndCopy(
+                                "Server click [$label]",
+                                "Tìm thấy phần tử và đã gọi click: $clicked"
+                            )
                         }
+
+                        // Giữ khoảng chờ 5,5 giây trước click; tiếp tục chờ 5,5 giây
+                        // để request playlist của server có thời gian xuất hiện.
+                        handler.postDelayed({
+                            clickPlayer()
+                            handler.postDelayed({ scanNextServer() }, 5500)
+                        }, 5500)
                     }
 
                     fun beginServerScan() {
@@ -811,9 +704,8 @@ class SuperembedProvider : MainAPI() {
                                 challengePassed = false
                                 sendRealMouseClick(wv, w / 2f, h / 2f)
                             } else if (!challengePassed) {
-                                ClipboardLogger.logAndCopy("Cloudflare", "Trang tải xong; nhận diện server mặc định trước khi click...")
+                                ClipboardLogger.logAndCopy("Cloudflare", "Trang tải xong; bắt đầu click...")
                                 challengePassed = true
-                                setInitialActiveServer()
                                 handler.postDelayed({ scheduleClick() }, 500)
                             }
                         }
