@@ -199,7 +199,7 @@ class SuperembedProvider : MainAPI() {
                 this.posterUrl = posterUrl; this.plot = description; this.year = year
             }
         } else {
-            return newMovieLoadResponse(title, canonical, TvType.TvMovie, canonical) {
+            return newMovieLoadResponse(title, canonical, TvType.Movie, canonical) {
                 this.posterUrl = posterUrl; this.plot = description; this.year = year
             }
         }
