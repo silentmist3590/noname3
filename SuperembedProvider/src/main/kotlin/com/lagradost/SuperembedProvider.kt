@@ -15,7 +15,6 @@ import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
-import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -48,6 +47,7 @@ private fun parseRef(s: String): Ref? {
 
 private data class SniffResult(val url: String, val headers: Map<String, String>)
 
+// Danh sách đen quảng cáo (Chặn tuyệt đối)
 private val AD_DOMAINS = listOf(
     "doubleclick.net", "googlesyndication.com", "googleadservices.com",
     "popads.net", "onclickads.net", "propellerads.com", "popcash.net",
@@ -206,7 +206,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // WEBVIEW SNIFFER XUYÊN IFRAME (LỚP VỎ -> PLAYVIDEO -> VIPSTREAM)
+    // WEBVIEW SNIFFER (CHIẾN LƯỢC CLICK + CHẶN MẠNG)
     // =====================================================================================
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun sniffStream(
@@ -243,72 +243,30 @@ class SuperembedProvider : MainAPI() {
                     }
 
                     wv.webChromeClient = object : WebChromeClient() {
-                        override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message?): Boolean = false
-
-                        // ⭐ NHẬN LOG TỪ JS HOOK (ĐÃ XUYÊN QUA IFRAME)
-                        override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
-                            val msg = consoleMessage?.message() ?: return super.onConsoleMessage(consoleMessage)
-                            
-                            if (msg.startsWith("HOOK_SUCCESS:")) {
-                                val url = msg.removePrefix("HOOK_SUCCESS:").trim()
-                                ClipboardLogger.logAndCopy("Hook Success", "Bắt được M3U8:\n$url")
-                                val reqHeaders = mapOf("Referer" to "https://streamingnow.mov/", "Origin" to "https://streamingnow.mov", "User-Agent" to ua)
-                                handler.post { finish(SniffResult(url, reqHeaders)) }
+                        override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message?): Boolean {
+                            val popup = WebView(ctx)
+                            popup.webViewClient = object : WebViewClient() {
+                                override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                                    return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream("".toByteArray()))
+                                }
                             }
+                            val transport = resultMsg?.obj as? WebView.WebViewTransport
+                            transport?.webView = popup
+                            resultMsg?.sendToTarget()
+                            handler.postDelayed({ try { popup.destroy() } catch (_: Exception) {} }, 2000)
                             return true
                         }
                     }
 
                     wv.webViewClient = object : WebViewClient() {
                         override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                            // ⭐ SCRIPT HOOK TỰ ĐỘNG CLICK VÀ BẮT LINK TRONG MỌI IFRAME
-                            val hookJs = """
+                            val js = """
                                 (function() {
-                                    if (window.__vipHooked) return;
-                                    window.__vipHooked = true;
-                                    
-                                    function tryPlay() {
-                                        // 1. Tìm nút Play và click
-                                        var btn = document.querySelector('.jw-icon-display, .vjs-big-play-button, .play-btn, #bigPlay, video');
-                                        if (btn) { try { btn.click(); } catch(e) {} }
-                                        
-                                        // 2. Ép video phát
-                                        var v = document.querySelector('video');
-                                        if (v) { v.muted = true; v.play().catch(function(){}); }
-                                    }
-
-                                    // 3. Hook XHR để bắt link m3u8
-                                    var origOpen = XMLHttpRequest.prototype.open;
-                                    XMLHttpRequest.prototype.open = function(method, url) {
-                                        this.addEventListener('load', function() {
-                                            var txt = this.responseText;
-                                            if (txt && (txt.indexOf('.m3u8') !== -1 || txt.indexOf('.mp4') !== -1)) {
-                                                var match = txt.match(/https?:\/\/[^"'\\\s]+\.m3u8[^"'\\\s]*/i);
-                                                if (match) console.log("HOOK_SUCCESS:" + match[0]);
-                                            }
-                                        });
-                                        origOpen.apply(this, arguments);
-                                    };
-
-                                    // 4. Hook Fetch
-                                    var origFetch = window.fetch;
-                                    window.fetch = function() {
-                                        return origFetch.apply(this, arguments).then(function(resp) {
-                                            resp.clone().text().then(function(txt) {
-                                                if (txt && (txt.indexOf('.m3u8') !== -1 || txt.indexOf('.mp4') !== -1)) {
-                                                    var match = txt.match(/https?:\/\/[^"'\\\s]+\.m3u8[^"'\\\s]*/i);
-                                                    if (match) console.log("HOOK_SUCCESS:" + match[0]);
-                                                }
-                                            });
-                                            return resp;
-                                        });
-                                    };
-
-                                    // 5. Chạy liên tục để đảm bảo click trúng
-                                    setInterval(tryPlay, 1000);
+                                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                                    window.chrome = { runtime: {} };
                                 })();
                             """.trimIndent()
-                            view?.evaluateJavascript(hookJs, null)
+                            view?.evaluateJavascript(js, null)
                         }
 
                         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
@@ -318,22 +276,28 @@ class SuperembedProvider : MainAPI() {
                                 return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream("".toByteArray()))
                             }
 
-                            // ⭐ NẾU BẮT ĐƯỢC LINK TRỰC TIẾP TỪ NETWORK
                             if (streamRegex.containsMatchIn(u) && !u.contains("/embed/iframe_player/")) {
                                 val reqHeaders = request?.requestHeaders ?: emptyMap()
-                                ClipboardLogger.logAndCopy("Sniff HIT", "Bắt trực tiếp: $u")
+                                ClipboardLogger.logAndCopy("Sniff HIT", "Bắt được: $u")
                                 handler.post { finish(SniffResult(u, reqHeaders)) }
                             }
                             return null
                         }
 
+                        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                            val u = request?.url?.toString() ?: return false
+                            if (AD_DOMAINS.any { u.contains(it, ignoreCase = true) }) return true
+                            if (!u.startsWith("http")) return true
+                            if (u.contains("streamingnow.mov") || u.contains("multiembed.mov")) return false
+                            return true // Chặn mọi redirect rác
+                        }
+
                         override fun onPageFinished(view: WebView?, url: String?) {
                             if (url?.contains("challenges.cloudflare.com") == true) {
-                                val t = SystemClock.uptimeMillis()
-                                val d = MotionEvent.obtain(t, t, MotionEvent.ACTION_DOWN, 540f, 960f, 0)
-                                val u = MotionEvent.obtain(t, t + 60, MotionEvent.ACTION_UP, 540f, 960f, 0)
-                                wv.dispatchTouchEvent(d)
-                                wv.dispatchTouchEvent(u)
+                                sendTouch(wv, 540f, 960f)
+                            } else {
+                                // Bắt đầu click liên tục
+                                startAutoClick(wv, handler)
                             }
                         }
                     }
@@ -344,8 +308,11 @@ class SuperembedProvider : MainAPI() {
                     CommonActivity.activity?.addContentView(wv, ViewGroup.LayoutParams(1080, 1920))
 
                     handler.postDelayed({ 
-                        if (!finished) finish(null) 
-                    }, 45_000L)
+                        if (!finished) {
+                            ClipboardLogger.logAndCopy("Timeout", "Seen: ${seen.takeLast(10).joinToString("\n")}")
+                            finish(null) 
+                        }
+                    }, 60_000L)
 
                     wv.loadUrl(pageUrl, mapOf("Referer" to referer))
                 } catch (e: Exception) {
@@ -353,6 +320,48 @@ class SuperembedProvider : MainAPI() {
                 }
             }
         }
+    }
+
+    // Tự động click liên tục vào giữa màn hình
+    private fun startAutoClick(wv: WebView, handler: Handler) {
+        var count = 0
+        val runnable = object : Runnable {
+            override fun run() {
+                if (count >= 30) return
+                count++
+                
+                // Click vào JS (để kích hoạt các sự kiện onclick của web)
+                wv.evaluateJavascript(
+                    "(function(){" +
+                    "var els=document.querySelectorAll('button,div,span,a,video');" +
+                    "for(var i=0;i<els.length;i++){" +
+                    "  var txt = els[i].innerText || '';" +
+                    "  if(txt.includes('Play') || els[i].className.includes('play')){" +
+                    "    try{els[i].click();}catch(e){}" +
+                    "  }" +
+                    "}" +
+                    "var v=document.querySelector('video');if(v){v.muted=true;v.play();}" +
+                    "})()", null
+                )
+
+                // Click bằng MotionEvent (Touch vật lý)
+                sendTouch(wv, 540f, 960f)
+
+                handler.postDelayed(this, 1500) // 1.5 giây click 1 lần
+            }
+        }
+        handler.postDelayed(runnable, 1000)
+    }
+
+    private fun sendTouch(wv: WebView, x: Float, y: Float) {
+        try {
+            val t = SystemClock.uptimeMillis()
+            val d = MotionEvent.obtain(t, t, MotionEvent.ACTION_DOWN, x, y, 0)
+            val u = MotionEvent.obtain(t, t + 60, MotionEvent.ACTION_UP, x, y, 0)
+            wv.dispatchTouchEvent(d)
+            wv.dispatchTouchEvent(u)
+            d.recycle(); u.recycle()
+        } catch (_: Exception) {}
     }
 
     override suspend fun loadLinks(
