@@ -12,9 +12,11 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Message
 import android.os.SystemClock
+import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -44,6 +46,9 @@ private fun parseRef(s: String): Ref? {
     return Ref(m.groupValues[1], id, m.groupValues[3].toIntOrNull(), m.groupValues[4].toIntOrNull())
 }
 
+private data class SniffResult(val url: String, val headers: Map<String, String>)
+
+// Danh sách đen các domain quảng cáo (từ log thực tế)
 private val AD_DOMAINS = listOf(
     "doubleclick.net", "googlesyndication.com", "googleadservices.com",
     "popads.net", "onclickads.net", "propellerads.com", "popcash.net",
@@ -55,10 +60,6 @@ private val AD_DOMAINS = listOf(
     "bkkunbeurvocc.website", "enveulpwblred.space", "my.rtmark.net",
     "bdcdmyzacrjkh.space", "acscdn.com", "aclib.net", "createlouisville.org",
     "workdeadlinededicate.com", "protrafficinspector.com", "push-sdk.com", "portalfluently.com"
-)
-
-private val SAFE_SERVERS = listOf(
-    "GDrive", "vidmoly", "voe", "lulustream", "streamwish", "doodstream", "netu", "mixdrop", "upstream", "filemoon"
 )
 
 // =====================================================================================
@@ -184,7 +185,6 @@ class SuperembedProvider : MainAPI() {
         val mediaType = ref.type
 
         val json = ApiServices.getTmdbDetails(mediaType, tmdbId) ?: return null
-
         val title = json.optString("title", json.optString("name"))
         val description = json.optString("overview")
         val posterUrl = poster(json.optString("poster_path"))
@@ -232,25 +232,34 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // BƯỚC 1: LẤY DANH SÁCH SERVER
+    // WEBVIEW SNIFFER (POPUP 5S + CLICK CHUỘT THẬT)
     // =====================================================================================
     @SuppressLint("SetJavaScriptEnabled")
-    private suspend fun getServerList(pageUrl: String, referer: String, ua: String): List<Pair<String, String>> {
+    private suspend fun sniffStream(
+        pageUrl: String,
+        referer: String,
+        ua: String,
+        seen: MutableList<String>
+    ): SniffResult? {
         return suspendCoroutine { cont ->
             val handler = Handler(Looper.getMainLooper())
             handler.post {
                 val ctx: Context? = CommonActivity.activity
                 if (ctx == null) {
-                    cont.resume(emptyList())
+                    ClipboardLogger.logAndCopy("Sniff Error", "Không có Context")
+                    cont.resume(null)
                     return@post
                 }
 
                 try {
+                    val w = 1080
+                    val h = 1920
                     val wv = WebView(ctx)
                     var finished = false
-                    val servers = mutableListOf<Pair<String, String>>()
+                    var isChallengePassed = false
+                    var popupCount = 0
 
-                    fun finish() {
+                    fun finish(res: SniffResult?) {
                         if (finished) return
                         finished = true
                         handler.removeCallbacksAndMessages(null)
@@ -259,50 +268,118 @@ class SuperembedProvider : MainAPI() {
                             (wv.parent as? ViewGroup)?.removeView(wv)
                             wv.destroy()
                         } catch (_: Exception) {}
-                        cont.resume(servers)
+                        cont.resume(res)
                     }
+
+                    val streamRegex = Regex("""\.m3u8|\.mpd|master\.txt""", RegexOption.IGNORE_CASE)
+                    val junkRegex = Regex("""\.(css|png|jpe?g|gif|svg|ico|woff2?|ttf)(\?|$)""", RegexOption.IGNORE_CASE)
 
                     wv.settings.apply {
                         javaScriptEnabled = true
                         domStorageEnabled = true
+                        databaseEnabled = true
                         mediaPlaybackRequiresUserGesture = false
                         javaScriptCanOpenWindowsAutomatically = true
                         setSupportMultipleWindows(true)
                         mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                     }
 
+                    // Popup đóng sau 5 giây
                     wv.webChromeClient = object : WebChromeClient() {
                         override fun onCreateWindow(
-                            view: WebView?,
-                            isDialog: Boolean,
-                            isUserGesture: Boolean,
-                            resultMsg: Message?
+                            view: WebView?, isDialog: Boolean,
+                            isUserGesture: Boolean, resultMsg: Message?
                         ): Boolean {
-                            val popup = WebView(ctx)
-                            popup.settings.javaScriptEnabled = true
-                            popup.webViewClient = object : WebViewClient() {
-                                override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean = true
-                                override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
-                                    return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream("".toByteArray()))
+                            try {
+                                popupCount++
+                                ClipboardLogger.logAndCopy("Popup #$popupCount", "Mở, đóng sau 5s")
+                                val popup = WebView(ctx)
+                                popup.settings.apply { javaScriptEnabled = true; domStorageEnabled = true }
+                                popup.webViewClient = object : WebViewClient() {
+                                    override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean = true
+                                    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = true
+                                    override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                                        return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream("".toByteArray()))
+                                    }
+                                }
+                                val transport = resultMsg?.obj as? WebView.WebViewTransport
+                                transport?.webView = popup
+                                resultMsg?.sendToTarget()
+                                handler.postDelayed({
+                                    try { popup.stopLoading(); popup.destroy() } catch (_: Exception) {}
+                                }, 5000)
+                                return true
+                            } catch (e: Exception) { return false }
+                        }
+                    }
+
+                    val clickJs = """
+                        (function() {
+                            function fire(sel) {
+                                var els = document.querySelectorAll(sel);
+                                for (var i = 0; i < els.length; i++) {
+                                    try { els[i].click(); } catch(e) {}
                                 }
                             }
-                            val transport = resultMsg?.obj as? WebView.WebViewTransport
-                            transport?.webView = popup
-                            resultMsg?.sendToTarget()
-                            handler.postDelayed({ try { popup.destroy() } catch (_: Exception) {} }, 1000)
-                            return true
+                            var overlays = document.querySelectorAll('div[style*="z-index: 999999"], div[style*="z-index: 2147483647"]');
+                            for (var i = 0; i < overlays.length; i++) {
+                                try { overlays[i].remove(); } catch(e) {}
+                            }
+                            fire('#bigPlay');
+                            fire('.jw-icon-display, .jw-display-icon-container, .jw-bigplay');
+                            fire('.vjs-big-play-button, .play-btn, .play-button');
+                            fire('media-player, media-play-button, [data-media-button]');
+                            fire('button[aria-label="Play"], [aria-label="Play"]');
+                            var v = document.querySelector('video');
+                            if (v) {
+                                v.muted = true;
+                                var p = v.play();
+                                if (p && p.catch) p.catch(function(){});
+                            }
+                        })();
+                    """.trimIndent()
+
+                    var clickCount = 0
+                    fun scheduleClick() {
+                        if (finished) return
+                        if (!isChallengePassed) {
+                            handler.postDelayed({ scheduleClick() }, 1000)
+                            return
+                        }
+                        clickCount++
+                        try {
+                            wv.evaluateJavascript(clickJs, null)
+                            // ⭐ CLICK CHUỘT THẬT
+                            sendRealMouseClick(wv, w / 2f, h / 2f)
+                            ClipboardLogger.logAndCopy("Click #$clickCount", "Mouse click, chờ 5.5s")
+                        } catch (_: Exception) {}
+                        if (clickCount < 6) {
+                            handler.postDelayed({ scheduleClick() }, 5500)
+                        } else {
+                            ClipboardLogger.logAndCopy("Click", "Đã click 6 lần, chờ thêm 8s...")
+                            handler.postDelayed({ finish(null) }, 8000)
                         }
                     }
 
                     wv.webViewClient = object : WebViewClient() {
                         override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                            // No-op
+                            if (url?.contains("challenges.cloudflare.com") == true || url?.contains("turnstile") == true) {
+                                isChallengePassed = false
+                            }
                         }
 
                         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                             val u = request?.url?.toString() ?: return null
+                            val reqHeaders = request?.requestHeaders ?: emptyMap()
                             if (AD_DOMAINS.any { u.contains(it, ignoreCase = true) }) {
+                                seen.add("BLOCKED AD: " + u.take(100))
                                 return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream("".toByteArray()))
+                            }
+                            if (!junkRegex.containsMatchIn(u) && seen.size < 200) seen.add(u.take(220))
+                            if (streamRegex.containsMatchIn(u) && !u.contains("/embed/iframe_player/")) {
+                                val hit = SniffResult(u, reqHeaders)
+                                ClipboardLogger.logAndCopy("Sniff HIT", "URL: $u")
+                                handler.post { finish(hit) }
                             }
                             return null
                         }
@@ -310,210 +387,112 @@ class SuperembedProvider : MainAPI() {
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                             val u = request?.url?.toString() ?: return false
                             if (AD_DOMAINS.any { u.contains(it, ignoreCase = true) }) return true
-                            if (!u.startsWith("http")) return true
+                            if (!u.startsWith("http://") && !u.startsWith("https://")) return true
                             return false
                         }
 
                         override fun onPageFinished(view: WebView?, url: String?) {
                             if (url?.contains("challenges.cloudflare.com") == true || url?.contains("turnstile") == true) {
-                                sendTouch(wv, 540f, 960f)
-                                return
-                            }
-
-                            handler.postDelayed({
-                                wv.evaluateJavascript(
-                                    "(function(){" +
-                                    "var list = [];" +
-                                    "document.querySelectorAll('ul.sources-list li[data-server]').forEach(function(l){" +
-                                    "  var n = l.querySelector('.server-name');" +
-                                    "  list.push({id: l.getAttribute('data-server'), name: n ? n.textContent.trim() : l.textContent.trim()});" +
-                                    "});" +
-                                    "return JSON.stringify(list);" +
-                                    "})()"
-                                ) { raw ->
-                                    try {
-                                        var cleaned = raw.trim()
-                                        if (cleaned.startsWith("\"") && cleaned.endsWith("\"")) {
-                                            cleaned = cleaned.substring(1, cleaned.length - 1)
-                                        }
-                                        cleaned = cleaned.replace("\\\"", "\"")
-                                        if (cleaned != "[]") {
-                                            val arr = org.json.JSONArray(cleaned)
-                                            for (i in 0 until arr.length()) {
-                                                val obj = arr.getJSONObject(i)
-                                                servers.add(obj.optString("id") to obj.optString("name"))
-                                            }
-                                        }
-                                        ClipboardLogger.logAndCopy("Servers", "Tìm thấy ${servers.size} server")
-                                    } catch (e: Exception) {
-                                        ClipboardLogger.logAndCopy("Server Parse Error", e.message ?: "")
-                                    }
-                                    finish()
+                                isChallengePassed = false
+                                sendRealMouseClick(wv, w / 2f, h / 2f)
+                            } else {
+                                if (!isChallengePassed) {
+                                    ClipboardLogger.logAndCopy("Cloudflare", "Đã vượt qua! Bắt đầu click...")
+                                    isChallengePassed = true
+                                    handler.postDelayed({ scheduleClick() }, 500)
                                 }
-                            }, 2000)
+                            }
+                        }
+
+                        override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: android.webkit.WebResourceError?) {
+                            if (request?.isForMainFrame == true) {
+                                ClipboardLogger.logAndCopy("WebView Error", "${request.url.host}: ${error?.errorCode} ${error?.description}")
+                            }
                         }
                     }
 
                     wv.measure(
-                        View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY),
-                        View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY)
+                        View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY)
                     )
-                    wv.layout(0, 0, 1080, 1920)
+                    wv.layout(0, 0, w, h)
                     wv.translationX = -4000f
-                    CommonActivity.activity?.addContentView(wv, ViewGroup.LayoutParams(1080, 1920))
+                    try { CommonActivity.activity?.addContentView(wv, ViewGroup.LayoutParams(w, h)) } catch (_: Exception) {}
 
-                    handler.postDelayed({ finish() }, 60_000L)
+                    handler.postDelayed({ finish(null) }, 120_000L)
                     wv.loadUrl(pageUrl, mapOf("Referer" to referer))
 
                 } catch (e: Exception) {
-                    cont.resume(emptyList())
+                    ClipboardLogger.logAndCopy("Sniff Exception", e.stackTraceToString().take(800))
+                    cont.resume(null)
                 }
             }
         }
     }
 
-    // =====================================================================================
-    // BƯỚC 2: RESOLVE SERVER - CHỈ THU THẬP URL, KHÔNG GỌI EXTRACTOR
-    // =====================================================================================
-    @SuppressLint("SetJavaScriptEnabled")
-    private suspend fun resolveServerUrls(
-        url: String,
-        serverName: String,
-        ua: String
-    ): List<String> {
-        return suspendCoroutine { cont ->
-            val handler = Handler(Looper.getMainLooper())
-            handler.post {
-                val ctx: Context? = CommonActivity.activity
-                if (ctx == null) {
-                    cont.resume(emptyList())
-                    return@post
-                }
-
-                try {
-                    val wv = WebView(ctx)
-                    var finished = false
-                    val foundUrls = mutableListOf<String>()
-                    val capturedUrls = mutableListOf<String>()
-
-                    fun finish() {
-                        if (finished) return
-                        finished = true
-                        handler.removeCallbacksAndMessages(null)
-                        try {
-                            wv.stopLoading()
-                            (wv.parent as? ViewGroup)?.removeView(wv)
-                            wv.destroy()
-                        } catch (_: Exception) {}
-                        cont.resume(foundUrls.toList())
-                    }
-
-                    wv.settings.apply {
-                        javaScriptEnabled = true
-                        domStorageEnabled = true
-                        mediaPlaybackRequiresUserGesture = false
-                        mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                    }
-
-                    wv.webViewClient = object : WebViewClient() {
-                        override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
-                            val u = request?.url?.toString() ?: return null
-                            if (AD_DOMAINS.any { u.contains(it, ignoreCase = true) }) {
-                                return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream("".toByteArray()))
-                            }
-                            if (!u.contains("streamingnow.mov") && !u.contains("multiembed.mov") &&
-                                !u.contains("cloudflare") && !u.contains("google") && !u.contains("histats")) {
-                                capturedUrls.add(u)
-                            }
-                            return null
-                        }
-
-                        override fun onPageFinished(view: WebView?, pageUrl: String?) {
-                            if (pageUrl == null) return
-
-                            view?.evaluateJavascript(
-                                "(function(){return document.body.innerText.indexOf('Select all images') !== -1 || document.body.innerText.indexOf('Verification') !== -1;})()"
-                            ) { hasCaptcha ->
-                                if (hasCaptcha == "true") {
-                                    ClipboardLogger.logAndCopy("Server $serverName", "Captcha - Bỏ qua")
-                                    finish()
-                                    return@evaluateJavascript
-                                }
-
-                                view?.evaluateJavascript(
-                                    "(function(){" +
-                                    "var v = document.querySelector('video');" +
-                                    "if (v && v.src) return v.src;" +
-                                    "var iframes = document.querySelectorAll('iframe');" +
-                                    "for (var i = 0; i < iframes.length; i++) {" +
-                                    "  if (iframes[i].src && iframes[i].src.indexOf('http') === 0) return iframes[i].src;" +
-                                    "}" +
-                                    "return '';" +
-                                    "})()"
-                                ) { src ->
-                                    var cleaned = src?.trim() ?: ""
-                                    if (cleaned.startsWith("\"") && cleaned.endsWith("\"")) {
-                                        cleaned = cleaned.substring(1, cleaned.length - 1)
-                                    }
-                                    cleaned = cleaned.replace("\\/", "/")
-
-                                    if (cleaned.isNotEmpty() && cleaned.startsWith("http")) {
-                                        foundUrls.add(cleaned)
-                                        finish()
-                                    } else {
-                                        // Thử click play rồi đợi
-                                        sendTouch(wv, 540f, 960f)
-                                        handler.postDelayed({
-                                            if (!finished) {
-                                                for (u in capturedUrls) {
-                                                    if (u.contains(".m3u8") || u.contains(".mp4")) {
-                                                        foundUrls.add(u)
-                                                    }
-                                                }
-                                                finish()
-                                            }
-                                        }, 4000)
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    wv.measure(
-                        View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY),
-                        View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY)
-                    )
-                    wv.layout(0, 0, 1080, 1920)
-                    wv.translationX = -4000f
-                    CommonActivity.activity?.addContentView(wv, ViewGroup.LayoutParams(1080, 1920))
-
-                    handler.postDelayed({ finish() }, 20_000L)
-                    wv.loadUrl(url, mapOf("Referer" to "https://streamingnow.mov/"))
-
-                } catch (e: Exception) {
-                    cont.resume(emptyList())
-                }
-            }
-        }
-    }
-
-    private fun sendTouch(wv: WebView, x: Float, y: Float) {
+    // ⭐ CLICK CHUỘT THẬT (SOURCE_MOUSE + BUTTON_PRIMARY)
+    private fun sendRealMouseClick(wv: WebView, x: Float, y: Float) {
         try {
-            val t = SystemClock.uptimeMillis()
-            val d = MotionEvent.obtain(t, t, MotionEvent.ACTION_DOWN, x, y, 0)
-            val u = MotionEvent.obtain(t, t + 60, MotionEvent.ACTION_UP, x, y, 0)
-            wv.dispatchTouchEvent(d)
-            wv.dispatchTouchEvent(u)
-            d.recycle(); u.recycle()
+            val downTime = SystemClock.uptimeMillis()
+
+            // 1. HOVER_MOVE - di chuyển chuột
+            try {
+                val hover = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_HOVER_MOVE, x, y, 0)
+                try {
+                    val f = MotionEvent::class.java.getDeclaredField("mSource")
+                    f.isAccessible = true
+                    f.setInt(hover, InputDevice.SOURCE_MOUSE)
+                } catch (_: Exception) {}
+                wv.dispatchGenericMotionEvent(hover)
+                hover.recycle()
+            } catch (_: Exception) {}
+
+            // 2. ACTION_DOWN
+            try {
+                val down = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 0)
+                try {
+                    val f = MotionEvent::class.java.getDeclaredField("mSource")
+                    f.isAccessible = true
+                    f.setInt(down, InputDevice.SOURCE_MOUSE)
+                } catch (_: Exception) {}
+                try {
+                    val f = MotionEvent::class.java.getDeclaredField("mButtonState")
+                    f.isAccessible = true
+                    f.setInt(down, MotionEvent.BUTTON_PRIMARY)
+                } catch (_: Exception) {}
+                wv.dispatchTouchEvent(down)
+                down.recycle()
+            } catch (_: Exception) {}
+
+            // 3. ACTION_UP
+            try {
+                val up = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, x, y, 0)
+                try {
+                    val f = MotionEvent::class.java.getDeclaredField("mSource")
+                    f.isAccessible = true
+                    f.setInt(up, InputDevice.SOURCE_MOUSE)
+                } catch (_: Exception) {}
+                try {
+                    val f = MotionEvent::class.java.getDeclaredField("mButtonState")
+                    f.isAccessible = true
+                    f.setInt(up, 0)
+                } catch (_: Exception) {}
+                try {
+                    val f = MotionEvent::class.java.getDeclaredField("mActionButton")
+                    f.isAccessible = true
+                    f.setInt(up, MotionEvent.BUTTON_PRIMARY)
+                } catch (_: Exception) {}
+                wv.dispatchTouchEvent(up)
+                up.recycle()
+            } catch (_: Exception) {}
         } catch (_: Exception) {}
     }
 
     // =====================================================================================
-    // LOAD LINKS - GỌI EXTRACTOR TẠI ĐÂY (SUSPEND CONTEXT HỢP LỆ)
+    // LOAD LINKS
     // =====================================================================================
     override suspend fun loadLinks(
-        data: String,
-        isCasting: Boolean,
+        data: String, isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
@@ -535,9 +514,7 @@ class SuperembedProvider : MainAPI() {
         val fakeReferer = "https://multiembed.mov/"
 
         val imdbId = imdbCache[tmdbId] ?: ""
-        if (imdbId.isNotEmpty()) {
-            ApiServices.fetchSubtitles(imdbId, subtitleCallback)
-        }
+        if (imdbId.isNotEmpty()) ApiServices.fetchSubtitles(imdbId, subtitleCallback)
 
         try {
             val embedUrl = if (type == "movie") {
@@ -547,66 +524,42 @@ class SuperembedProvider : MainAPI() {
             }
 
             ClipboardLogger.logAndCopy("WebView", "Tải: $embedUrl")
+            val seen = mutableListOf<String>()
+            val result = sniffStream(embedUrl, fakeReferer, ua, seen)
 
-            // Bước 1: Lấy danh sách server
-            val servers = getServerList(embedUrl, fakeReferer, ua)
-
-            if (servers.isEmpty()) {
-                ClipboardLogger.logAndCopy("Error", "Không lấy được danh sách server")
+            if (result == null) {
+                ClipboardLogger.logAndCopy("Error", "Không bắt được link.\nSeen cuối:\n${seen.takeLast(10).joinToString("\n")}")
                 return false
             }
 
-            ClipboardLogger.logAndCopy("Servers", "Danh sách: ${servers.joinToString { "${it.second}(${it.first})" }}")
+            val playerReferer = "https://streamingnow.mov/"
+            val cookie = CookieManager.getInstance().getCookie(result.url) ?: ""
 
-            // Bước 2: Duyệt qua từng server
-            var found = false
-            val processedServers = mutableSetOf<String>()
-
-            // Sắp xếp: server an toàn trước, còn lại sau
-            val sortedServers = servers.sortedByDescending { server ->
-                if (SAFE_SERVERS.any { server.second.contains(it, ignoreCase = true) }) 1 else 0
+            val finalHeaders = result.headers.toMutableMap().apply {
+                put("User-Agent", ua)
+                put("Referer", playerReferer)
+                put("Origin", "https://streamingnow.mov")
+                if (cookie.isNotEmpty()) put("Cookie", cookie)
             }
 
-            for ((serverId, serverName) in sortedServers) {
-                if (found) break
-                if (processedServers.contains(serverId)) continue
-                processedServers.add(serverId)
-
-                ClipboardLogger.logAndCopy("Try Server", serverName)
-                val serverUrl = "https://streamingnow.mov/playvideo.php?server_id=$serverId"
-                val urls = resolveServerUrls(serverUrl, serverName, ua)
-
-                for (u in urls) {
-                    if (u.contains(".m3u8") || u.contains(".mp4")) {
-                        callback(newExtractorLink(this.name, "MultiEmbed $serverName", u, ExtractorLinkType.M3U8) {
-                            this.referer = "https://streamingnow.mov/"
-                            this.quality = Qualities.Unknown.value
-                            this.headers = mapOf("User-Agent" to ua, "Referer" to "https://streamingnow.mov/")
-                        })
-                        found = true
-                    } else if (u.startsWith("http") && !Regex("""\.(js|css|png|jpe?g|gif|svg|ico|woff2?|ttf|json)(\?|$)""", RegexOption.IGNORE_CASE).containsMatchIn(u)) {
-                        try {
-                            loadExtractor(u, "https://streamingnow.mov/", subtitleCallback, callback)
-                            found = true
-                        } catch (e: Exception) {
-                            ClipboardLogger.logAndCopy("Extractor Error", e.message ?: "")
-                        }
-                    }
-                }
-
-                if (found) {
-                    ClipboardLogger.logAndCopy("Success", "Tìm thấy link từ $serverName")
-                    break
+            if (result.url.contains(".m3u8")) {
+                callback(newExtractorLink(this.name, "MultiEmbed", result.url, ExtractorLinkType.M3U8) {
+                    this.referer = playerReferer
+                    this.quality = Qualities.P1080.value
+                    this.headers = finalHeaders
+                })
+            } else {
+                try {
+                    loadExtractor(result.url, playerReferer, subtitleCallback, callback)
+                } catch (e: Exception) {
+                    callback(newExtractorLink(this.name, "MultiEmbed", result.url, ExtractorLinkType.M3U8) {
+                        this.referer = playerReferer
+                        this.quality = Qualities.Unknown.value
+                        this.headers = finalHeaders
+                    })
                 }
             }
-
-            if (found) {
-                return true
-            }
-
-            ClipboardLogger.logAndCopy("Error", "Tất cả server đều thất bại (có thể do captcha)")
-            return false
-
+            return true
         } catch (e: Exception) {
             if (e is java.util.concurrent.CancellationException) throw e
             ClipboardLogger.logAndCopy("Exception", "Error: ${e.message}\nStackTrace: ${e.stackTraceToString().take(1500)}")
