@@ -467,6 +467,15 @@ class SuperembedProvider : MainAPI() {
                                                     val skip = listOf("streamingnow.mov", "multiembed.mov", "cloudflare", "gstatic", "googleapis", "google", "histats", "cloudfront", "facebook")
                                                     val useful = got.filter { x -> skip.none { x.contains(it, true) } && AD_DOMAINS.none { x.contains(it, true) } }.distinct()
                                                     servers.add(nm to useful)
+                                                    if (i <= 4) {
+                                                        ClipboardLogger.logAndCopy("Req $nm", got.filter { !junkRegex.containsMatchIn(it) }.takeLast(15).joinToString("\n") { it.take(200) })
+                                                        wv.evaluateJavascript(
+                                                            "(function(){var f=document.querySelector('.main-source-frame')||document.querySelector('iframe.source-frame');if(!f)return 'noframe';var h='';try{var c=f.contentDocument.documentElement.cloneNode(true);c.querySelectorAll('style,svg,noscript').forEach(function(e){e.remove()});h=c.outerHTML.replace(/\\s+/g,' ').slice(0,3000)}catch(e){h='ERR '+e}return 'src='+f.src+' | '+h})()"
+                                                        ) { raw2 ->
+                                                            val t = try { org.json.JSONArray("[" + (raw2 ?: "\"\"") + "]").optString(0) } catch (_: Exception) { raw2 ?: "" }
+                                                            ClipboardLogger.logAndCopy("Frame $nm", t)
+                                                        }
+                                                    }
                                                     ClipboardLogger.logAndCopy("Server $nm", useful.take(8).joinToString("\n").ifEmpty { "(không có request ngoài)" })
                                                     step()
                                                 }, 4500L)
