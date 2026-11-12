@@ -1,5 +1,5 @@
 // use an integer for version numbers
-version = 30
+version = 3
 
 cloudstream {
     description = "Superembed.stream - Movie and TV"
