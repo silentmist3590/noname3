@@ -29,7 +29,6 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.TextView
-import android.widget.Toast
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 import org.json.JSONObject
@@ -216,7 +215,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // WEBVIEW SNIFFER & CHUỘT ẢO CHO TV
+    // WEBVIEW SNIFFER (ĐÃ FIX LỖI THREAD KHIẾN WEBVIEW KHÔNG ĐÓNG)
     // =====================================================================================
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun sniffStream(
@@ -249,7 +248,7 @@ class SuperembedProvider : MainAPI() {
                         finished = true
                         handler.removeCallbacksAndMessages(null)
                         try {
-                            // ⭐ CƯỠNG CHẾ HỦY WEBVIEW ĐỂ GIẢI PHÓNG RAM
+                            container.visibility = View.GONE
                             wv.stopLoading()
                             wv.loadUrl("about:blank")
                             wv.clearHistory()
@@ -257,8 +256,6 @@ class SuperembedProvider : MainAPI() {
                             wv.destroy()
                             
                             (container.parent as? ViewGroup)?.removeView(container)
-                            
-                            // Sửa lỗi Unresolved reference 'window'
                             val root = CommonActivity.activity?.window?.decorView as? ViewGroup
                             root?.removeView(container)
                             
@@ -267,6 +264,41 @@ class SuperembedProvider : MainAPI() {
                             }
                         } catch (_: Exception) {}
                         cont.resume(Pair(firstStream, serverList))
+                    }
+
+                    fun processFoundUrl(url: String, headers: Map<String, String>) {
+                        if (firstStream != null || finished) return
+                        firstStream = SniffResult(url, headers)
+                        ClipboardLogger.logAndCopy("Sniff HIT", "Đã lấy được link: $url")
+                        
+                        // ⭐ SỬA LỖI: Chuyển toàn bộ logic đóng WebView về Main Thread
+                        handler.post {
+                            if (finished) return@post
+                            
+                            if (!hasExtractedServers) {
+                                hasExtractedServers = true
+                                try {
+                                    wv.evaluateJavascript(
+                                        "(function(){" +
+                                        "var arr=[];" +
+                                        "document.querySelectorAll('ul.sources-list li[data-server]').forEach(function(l){" +
+                                        "  var n=l.querySelector('.server-name');" +
+                                        "  arr.push({id:l.getAttribute('data-server'), name: n ? n.textContent.trim() : l.textContent.trim()});" +
+                                        "});" +
+                                        "return JSON.stringify(arr);" +
+                                        "})()"
+                                    ) { raw ->
+                                        serverList = parseServerList(raw)
+                                        ClipboardLogger.logAndCopy("ServerList", "Lấy được ${serverList.size} server phụ.")
+                                    }
+                                } catch (_: Exception) {}
+                            }
+                            
+                            // ⭐ CƯỠNG CHẾ ĐÓNG SAU 300MS DÙ CÓ LẤY ĐƯỢC SERVER PHỤ HAY KHÔNG
+                            handler.postDelayed({
+                                if (!finished) finish()
+                            }, 300L)
+                        }
                     }
 
                     val streamRegex = Regex("""\.m3u8|\.mpd|master\.txt|\.mp4""", RegexOption.IGNORE_CASE)
@@ -283,7 +315,7 @@ class SuperembedProvider : MainAPI() {
                     }
                     wv.setBackgroundColor(Color.BLACK)
 
-                    // Cấu hình Chuột ảo
+                    // Chuột ảo
                     cursor.text = "➕"
                     cursor.textSize = 40f
                     cursor.setTextColor(Color.RED)
@@ -334,7 +366,14 @@ class SuperembedProvider : MainAPI() {
                                 ClipboardLogger.logAndCopy("Captcha", "Đang chờ bạn giải Captcha...")
                             } else if (msg == "CAPTCHA_OFF") {
                                 isCaptchaActive = false
-                                ClipboardLogger.logAndCopy("Captcha", "Đã giải xong, tự động phát...")
+                                ClipboardLogger.logAndCopy("Captcha", "Đã giải xong.")
+                            } else if (msg.startsWith("HOOK_VIDEO_URL:")) {
+                                val url = msg.removePrefix("HOOK_VIDEO_URL:").trim()
+                                if (url.startsWith("http") && !AD_DOMAINS.any { url.contains(it, true) }) {
+                                    ClipboardLogger.logAndCopy("JS Hook", "Phát hiện link: $url")
+                                    val headers = mapOf("Referer" to "https://streamingnow.mov/", "User-Agent" to ua)
+                                    processFoundUrl(url, headers)
+                                }
                             }
                             return true
                         }
@@ -346,7 +385,49 @@ class SuperembedProvider : MainAPI() {
                                 (function() {
                                     try { Object.defineProperty(navigator, 'webdriver', {get: () => undefined}); } catch(e) {}
                                     try { window.chrome = { runtime: {} }; } catch(e) {}
-                                    
+
+                                    if (window.fetch) {
+                                        var origFetch = window.fetch;
+                                        window.fetch = function() {
+                                            var args = arguments;
+                                            return origFetch.apply(this, args).then(function(resp) {
+                                                var url = typeof args[0] === 'string' ? args[0] : args[0].url;
+                                                if (url && (url.includes('.m3u8') || url.includes('.mp4'))) {
+                                                    console.log("HOOK_VIDEO_URL:" + new URL(url, window.location.href).href);
+                                                } else {
+                                                    resp.clone().text().then(function(txt) {
+                                                        if (txt && txt.startsWith('#EXTM3U')) {
+                                                            console.log("HOOK_VIDEO_URL:" + new URL(url, window.location.href).href);
+                                                        }
+                                                    }).catch(function(){});
+                                                }
+                                                return resp;
+                                            });
+                                        };
+                                    }
+
+                                    var origOpen = XMLHttpRequest.prototype.open;
+                                    XMLHttpRequest.prototype.open = function(method, url) {
+                                        this.addEventListener('load', function() {
+                                            if (url && (url.includes('.m3u8') || url.includes('.mp4'))) {
+                                                console.log("HOOK_VIDEO_URL:" + new URL(url, window.location.href).href);
+                                            } else if (this.responseText && this.responseText.startsWith('#EXTM3U')) {
+                                                console.log("HOOK_VIDEO_URL:" + new URL(url, window.location.href).href);
+                                            }
+                                        });
+                                        origOpen.apply(this, arguments);
+                                    };
+
+                                    var checkVideo = setInterval(function() {
+                                        var v = document.querySelector('video');
+                                        if (v && v.duration > 0) {
+                                            if (v.src && v.src.startsWith('http')) {
+                                                console.log("HOOK_VIDEO_URL:" + v.src);
+                                                clearInterval(checkVideo);
+                                            }
+                                        }
+                                    }, 1000);
+
                                     setInterval(function() {
                                         var isCaptcha = document.body.innerText.includes('Select all images') || 
                                                         document.body.innerText.includes('Verification') ||
@@ -375,37 +456,8 @@ class SuperembedProvider : MainAPI() {
                             }
 
                             if (streamRegex.containsMatchIn(u) && !u.contains("/embed/iframe_player/")) {
-                                if (firstStream == null) {
-                                    firstStream = SniffResult(u, request?.requestHeaders ?: emptyMap())
-                                    ClipboardLogger.logAndCopy("Sniff HIT", "Bắt được link: $u")
-                                    
-                                    if (!hasExtractedServers) {
-                                        hasExtractedServers = true
-                                        handler.post {
-                                            if (!finished) {
-                                                wv.evaluateJavascript(
-                                                    "(function(){" +
-                                                    "var arr=[];" +
-                                                    "document.querySelectorAll('ul.sources-list li[data-server]').forEach(function(l){" +
-                                                    "  var n=l.querySelector('.server-name');" +
-                                                    "  arr.push({id:l.getAttribute('data-server'), name: n ? n.textContent.trim() : l.textContent.trim()});" +
-                                                    "});" +
-                                                    "return JSON.stringify(arr);" +
-                                                    "})()"
-                                                ) { raw ->
-                                                    serverList = parseServerList(raw)
-                                                    ClipboardLogger.logAndCopy("ServerList", "Tìm thấy ${serverList.size} server.")
-                                                }
-                                            }
-                                        }
-                                    }
-                                    
-                                    // ⭐ RÚT NGẮN THỜI GIAN CHỜ ĐỂ TRÁNH GIẬT LAG
-                                    handler.postDelayed({ 
-                                        Toast.makeText(ctx, "Đã bắt được link, chuyển sang trình phát...", Toast.LENGTH_SHORT).show()
-                                        finish() 
-                                    }, 800L)
-                                }
+                                val headers = request?.requestHeaders ?: mapOf("Referer" to "https://streamingnow.mov/", "User-Agent" to ua)
+                                processFoundUrl(u, headers)
                             }
                             return null
                         }
@@ -417,9 +469,7 @@ class SuperembedProvider : MainAPI() {
                             return false
                         }
 
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            ClipboardLogger.logAndCopy("Loaded", "$url")
-                        }
+                        override fun onPageFinished(view: WebView?, url: String?) {}
 
                         override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
                             if (request?.isForMainFrame == true) {
@@ -442,8 +492,8 @@ class SuperembedProvider : MainAPI() {
 
                     val clickRunnable = object : Runnable {
                         override fun run() {
-                            if (finished) return
-                            if (!isCaptchaActive && firstStream == null) {
+                            if (finished || firstStream != null) return
+                            if (!isCaptchaActive) {
                                 try {
                                     wv.evaluateJavascript(
                                         "(function(){" +
@@ -454,12 +504,11 @@ class SuperembedProvider : MainAPI() {
                                         "    try{el.click();}catch(e){}" +
                                         "  }" +
                                         "}" +
-                                        "var v=document.querySelector('video');if(v){v.muted=true;v.play().catch(function(){});}" +
                                         "})()", null
                                     )
                                 } catch (_: Exception) {}
                             }
-                            handler.postDelayed(this, 2500)
+                            handler.postDelayed(this, 2000)
                         }
                     }
                     handler.postDelayed(clickRunnable, 2000)
