@@ -454,6 +454,14 @@ class SuperembedProvider : MainAPI() {
                                                 (0 until arr.length()).map { arr.getJSONObject(it).optString("s") to arr.getJSONObject(it).optString("n") }
                                             } catch (_: Exception) { emptyList() }
                                             ClipboardLogger.logAndCopy("ServerList", list.joinToString { "${it.second}(${it.first})" })
+                                            fun inspect(cb: (String) -> Unit) {
+                                                wv.evaluateJavascript(
+                                                    "(function(){var f=document.querySelector('.main-source-frame');if(!f)return 'noframe';try{var d=f.contentDocument;var h=d.documentElement.innerHTML;var cap=/captcha-holder|captcha_answer|Select all images|Verification/i.test(h);var r=[];d.querySelectorAll('iframe,video,source').forEach(function(e){if(e.src)r.push(e.src)});var c=d.documentElement.cloneNode(true);c.querySelectorAll('style,svg,noscript').forEach(function(e){e.remove()});return (cap?'CAPTCHA':'OK')+'|'+r.join(' ')+'§§'+c.outerHTML.replace(/\\s+/g,' ').slice(0,2500)}catch(e){return 'ERR '+e}})()"
+                                                ) { raw2 ->
+                                                    cb(try { org.json.JSONArray("[" + (raw2 ?: "\"\"") + "]").optString(0) } catch (_: Exception) { raw2 ?: "" })
+                                                }
+                                            }
+                                            var shown = false
                                             var i = 0
                                             fun step() {
                                                 if (finished) return
@@ -478,22 +486,57 @@ class SuperembedProvider : MainAPI() {
                                                     val got = synchronized(capture) { capture.drop(mark).toList() }
                                                     val skip = listOf("streamingnow.mov", "multiembed.mov", "cloudflare", "gstatic", "googleapis", "google", "histats", "cloudfront", "facebook")
                                                     val useful = got.filter { x -> skip.none { x.contains(it, true) } && AD_DOMAINS.none { x.contains(it, true) } }.distinct()
-                                                    wv.evaluateJavascript(
-                                                        "(function(){var f=document.querySelector('.main-source-frame');if(!f)return 'noframe';try{var d=f.contentDocument;var h=d.documentElement.innerHTML;var cap=/captcha-holder|captcha_answer|Select all images|Verification/i.test(h);var r=[];d.querySelectorAll('iframe,video,source').forEach(function(e){if(e.src)r.push(e.src)});return (cap?'CAPTCHA':'OK')+'|'+r.join(' ')}catch(e){return 'ERR '+e}})()"
-                                                    ) { raw2 ->
-                                                        val t = try { org.json.JSONArray("[" + (raw2 ?: "\"\"") + "]").optString(0) } catch (_: Exception) { raw2 ?: "" }
+                                                    fun handle(t: String) {
                                                         val isCap = t.startsWith("CAPTCHA")
-                                                        val inner = t.substringAfter("|", "").split(" ").filter { it.startsWith("http") }
+                                                        val head = t.substringBefore("§§")
+                                                        val html = t.substringAfter("§§", "")
+                                                        val inner = head.substringAfter("|", "").split(" ").filter { it.startsWith("http") }
                                                         val all = (inner + useful).distinct()
                                                         if (isCap) {
+                                                            if (!shown) {
+                                                                shown = true
+                                                                ClipboardLogger.logAndCopy("Captcha", "Hiện WebView cho người dùng xác minh: $nm")
+                                                                try {
+                                                                    wv.layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+                                                                    wv.translationX = 0f
+                                                                    wv.bringToFront()
+                                                                    wv.requestLayout()
+                                                                    Toast.makeText(wv.context, "Hãy giải captcha trong khung hiện ra (tối đa 60 giây)", Toast.LENGTH_LONG).show()
+                                                                } catch (_: Throwable) {}
+                                                                var waited = 0
+                                                                fun poll() {
+                                                                    if (finished) return
+                                                                    inspect { t2 ->
+                                                                        if (!t2.startsWith("CAPTCHA")) {
+                                                                            ClipboardLogger.logAndCopy("Captcha", "Đã xác minh, quét lại $nm")
+                                                                            i--
+                                                                            handler.postDelayed({ step() }, 500L)
+                                                                        } else if (waited >= 60_000) {
+                                                                            captcha.add(nm)
+                                                                            ClipboardLogger.logAndCopy("Server $nm", "CAPTCHA - hết giờ, bỏ qua")
+                                                                            step()
+                                                                        } else {
+                                                                            waited += 2000
+                                                                            handler.postDelayed({ poll() }, 2000L)
+                                                                        }
+                                                                    }
+                                                                }
+                                                                poll()
+                                                                return
+                                                            }
                                                             captcha.add(nm)
                                                             ClipboardLogger.logAndCopy("Server $nm", "CAPTCHA - bỏ qua")
                                                         } else {
                                                             servers.add(nm to all)
                                                             ClipboardLogger.logAndCopy("Server $nm", (if (t.startsWith("ERR") || t == "noframe") "[$t] " else "OK ") + all.take(8).joinToString("\n").ifEmpty { "(không có link)" })
+                                                            if (all.isEmpty()) {
+                                                                ClipboardLogger.logAndCopy("Html $nm", html.take(2500).ifEmpty { "(trống)" })
+                                                                ClipboardLogger.logAndCopy("Req $nm", got.filter { !junkRegex.containsMatchIn(it) }.takeLast(15).joinToString("\n") { it.take(200) })
+                                                            }
                                                         }
                                                         step()
                                                     }
+                                                    inspect { handle(it) }
                                                 }, 5000L)
                                             }
                                             if (list.isEmpty()) handler.postDelayed({ finish(null) }, 500L) else step()
@@ -578,7 +621,7 @@ class SuperembedProvider : MainAPI() {
                     } catch (_: Exception) {}
 
                     // Tổng timeout 120 giây (giảm từ 180s vì click ít hơn)
-                    handler.postDelayed({ finish(null) }, 120_000L)
+                    handler.postDelayed({ finish(null) }, 240_000L)
                     wv.loadUrl(pageUrl, mapOf("Referer" to referer))
 
                 } catch (e: Exception) {
