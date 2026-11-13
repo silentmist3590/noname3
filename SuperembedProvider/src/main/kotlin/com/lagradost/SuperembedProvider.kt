@@ -14,6 +14,7 @@ import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
@@ -215,11 +216,11 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // WEBVIEW SNIFFER (FIX LỖI 2004 & TỐI ƯU TV)
+    // WEBVIEW SNIFFER (FIX LỖI CLOUDFLARE - KHÔNG GIẢ LẬP)
     // =====================================================================================
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun sniffStream(
-        pageUrl: String, referer: String, ua: String, seen: MutableList<String>
+        pageUrl: String, referer: String, seen: MutableList<String>
     ): Pair<SniffResult?, List<ServerInfo>> {
         return suspendCoroutine { cont ->
             val handler = Handler(Looper.getMainLooper())
@@ -242,6 +243,10 @@ class SuperembedProvider : MainAPI() {
 
                     var cx = 500f
                     var cy = 500f
+
+                    // ⭐ LẤY USER-AGENT THỰC CỦA THIẾT BỊ (Không hardcode Windows)
+                    // Giúp Cloudflare thấy đây là trình duyệt Android thật, đồng bộ với Client Hints
+                    val realUa = wv.settings.userAgentString
 
                     fun finish() {
                         if (finished) return
@@ -269,7 +274,6 @@ class SuperembedProvider : MainAPI() {
                     fun processFoundUrl(url: String, headers: Map<String, String>) {
                         if (firstStream != null || finished) return
                         
-                        // Lấy Cookie từ WebView để đính kèm
                         val cookie = CookieManager.getInstance().getCookie(url) ?: ""
                         val finalHeaders = headers.toMutableMap().apply {
                             if (cookie.isNotEmpty()) put("Cookie", cookie)
@@ -300,7 +304,7 @@ class SuperembedProvider : MainAPI() {
                                 } catch (_: Exception) {}
                             }
                             
-                            // Đóng WebView sau 300ms để kịp lấy server list
+                            // Đóng WebView sau 300ms
                             handler.postDelayed({
                                 if (!finished) finish()
                             }, 300L)
@@ -315,13 +319,13 @@ class SuperembedProvider : MainAPI() {
                         mediaPlaybackRequiresUserGesture = false
                         javaScriptCanOpenWindowsAutomatically = true
                         setSupportMultipleWindows(true)
-                        userAgentString = ua
                         mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                         cacheMode = WebSettings.LOAD_NO_CACHE
+                        // ⭐ KHÔNG SET userAgentString, ĐỂ WEBVIEW DÙNG UA MẶC ĐỊNH CỦA HỆ THỐNG
                     }
                     wv.setBackgroundColor(Color.BLACK)
 
-                    // Cấu hình Chuột ảo TV
+                    // Chuột ảo TV
                     cursor.text = "➕"
                     cursor.textSize = 40f
                     cursor.setTextColor(Color.RED)
@@ -338,7 +342,7 @@ class SuperembedProvider : MainAPI() {
                                 KeyEvent.KEYCODE_DPAD_LEFT -> { cx -= 40f; cursor.x = cx; true }
                                 KeyEvent.KEYCODE_DPAD_RIGHT -> { cx += 40f; cursor.x = cx; true }
                                 KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
-                                    sendTouch(wv, cx + 20f, cy + 20f)
+                                    sendRealTouch(wv, cx + 20f, cy + 20f, handler)
                                     true
                                 }
                                 KeyEvent.KEYCODE_BACK -> {
@@ -377,14 +381,10 @@ class SuperembedProvider : MainAPI() {
                                 val url = msg.removePrefix("HOOK_VIDEO_URL:").trim()
                                 if (url.startsWith("http") && !AD_DOMAINS.any { url.contains(it, true) }) {
                                     ClipboardLogger.logAndCopy("JS Hook", "Phát hiện link: $url")
-                                    // Tạo headers giả lập trình duyệt để vượt 2004
                                     val headers = mapOf(
                                         "Referer" to "https://streamingnow.mov/",
                                         "Origin" to "https://streamingnow.mov",
-                                        "User-Agent" to ua,
-                                        "sec-ch-ua" to "\"Not-A.Brand\";v=\"99\", \"Google Chrome\";v=\"157\", \"Chromium\";v=\"157\"",
-                                        "sec-ch-ua-mobile" to "?0",
-                                        "sec-ch-ua-platform" to "\"Windows\""
+                                        "User-Agent" to realUa
                                     )
                                     processFoundUrl(url, headers)
                                 }
@@ -395,11 +395,9 @@ class SuperembedProvider : MainAPI() {
 
                     wv.webViewClient = object : WebViewClient() {
                         override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                            // ⭐ KHÔNG DÙNG ANTI-BOT JS, CHỈ DÙNG JS BẮT LINK VÀ THEO DÕI CAPTCHA
                             val js = """
                                 (function() {
-                                    try { Object.defineProperty(navigator, 'webdriver', {get: () => undefined}); } catch(e) {}
-                                    try { window.chrome = { runtime: {} }; } catch(e) {}
-
                                     if (window.fetch) {
                                         var origFetch = window.fetch;
                                         window.fetch = function() {
@@ -473,10 +471,6 @@ class SuperembedProvider : MainAPI() {
                                 val headers = request?.requestHeaders?.toMutableMap() ?: mutableMapOf()
                                 headers["Referer"] = "https://streamingnow.mov/"
                                 headers["Origin"] = "https://streamingnow.mov"
-                                headers["User-Agent"] = ua
-                                headers["sec-ch-ua"] = "\"Not-A.Brand\";v=\"99\", \"Google Chrome\";v=\"157\", \"Chromium\";v=\"157\""
-                                headers["sec-ch-ua-mobile"] = "?0"
-                                headers["sec-ch-ua-platform"] = "\"Windows\""
                                 processFoundUrl(u, headers)
                             }
                             return null
@@ -496,7 +490,7 @@ class SuperembedProvider : MainAPI() {
                                 val desc = error?.description?.toString() ?: ""
                                 if (retryCount < 3 && (desc.contains("QUIC", true) || error?.errorCode == -1 || error?.errorCode == -6)) {
                                     retryCount++
-                                    handler.postDelayed({ wv.loadUrl(pageUrl, mapOf("Referer" to referer)) }, 1500)
+                                    handler.postDelayed({ wv.loadUrl(pageUrl) }, 1500)
                                 }
                             }
                         }
@@ -534,12 +528,44 @@ class SuperembedProvider : MainAPI() {
                     handler.postDelayed(clickRunnable, 2000)
 
                     handler.postDelayed({ if (!finished) finish() }, 180_000L)
-                    wv.loadUrl(pageUrl, mapOf("Referer" to referer))
+                    
+                    // ⭐ LOAD URL KHÔNG KÈM HEADER REFERER LẠ (Tránh Cloudflare nghi ngờ)
+                    wv.loadUrl(pageUrl)
                 } catch (e: Exception) {
                     cont.resume(Pair(null, emptyList()))
                 }
             }
         }
+    }
+
+    // ⭐ GỬI SỰ KIỆN CHẠM CHUẨN XÁC NHƯ NGÓN TAY THẬT (ĐỂ CLOUDFLARE CHẤP NHẬN)
+    private fun sendRealTouch(wv: WebView, x: Float, y: Float, handler: Handler) {
+        val downTime = SystemClock.uptimeMillis()
+        
+        val down = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 0)
+        down.source = InputDevice.SOURCE_TOUCHSCREEN
+        down.setPressure(0.7f)
+        down.setSize(0.1f)
+        wv.dispatchTouchEvent(down)
+        down.recycle()
+
+        handler.postDelayed({
+            val moveTime = SystemClock.uptimeMillis()
+            val move = MotionEvent.obtain(downTime, moveTime, MotionEvent.ACTION_MOVE, x + 1f, y + 1f, 0)
+            move.source = InputDevice.SOURCE_TOUCHSCREEN
+            move.setPressure(0.6f)
+            wv.dispatchTouchEvent(move)
+            move.recycle()
+        }, 30)
+
+        handler.postDelayed({
+            val upTime = SystemClock.uptimeMillis()
+            val up = MotionEvent.obtain(downTime, upTime, MotionEvent.ACTION_UP, x, y, 0)
+            up.source = InputDevice.SOURCE_TOUCHSCREEN
+            up.setPressure(0.0f)
+            wv.dispatchTouchEvent(up)
+            up.recycle()
+        }, 100)
     }
 
     private fun parseServerList(raw: String?): List<ServerInfo> {
@@ -559,28 +585,16 @@ class SuperembedProvider : MainAPI() {
         } catch (_: Exception) { emptyList() }
     }
 
-    private fun sendTouch(wv: WebView, x: Float, y: Float) {
-        try {
-            val t = SystemClock.uptimeMillis()
-            val d = MotionEvent.obtain(t, t, MotionEvent.ACTION_DOWN, x, y, 0)
-            val u = MotionEvent.obtain(t, t + 60, MotionEvent.ACTION_UP, x, y, 0)
-            wv.dispatchTouchEvent(d)
-            wv.dispatchTouchEvent(u)
-            d.recycle(); u.recycle()
-        } catch (_: Exception) {}
-    }
-
     // =====================================================================================
     // LẤY LINK TỪ CÁC SERVER PHỤ
     // =====================================================================================
     private suspend fun extractSpecificServers(
         servers: List<ServerInfo>,
-        ua: String,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
         val playerReferer = "https://streamingnow.mov/"
-        val cookie = CookieManager.getInstance().getCookie("https://streamingnow.mov/") ?: ""
+        val cookie = CookieManager.getInstance().getCookie(playerReferer) ?: ""
         
         val targetNames = listOf("streamwish", "mixdrop")
         val filteredServers = servers.filter { s -> targetNames.any { s.name.contains(it, true) } }
@@ -592,15 +606,10 @@ class SuperembedProvider : MainAPI() {
         for (server in filteredServers) {
             val serverUrl = "https://streamingnow.mov/playvideo.php?server_id=${server.id}"
             try {
-                // Thêm sec-ch-ua để vượt 403
                 val res = app.get(serverUrl, headers = mapOf(
-                    "User-Agent" to ua,
                     "Referer" to playerReferer,
                     "Origin" to playerReferer,
-                    "Cookie" to cookie,
-                    "sec-ch-ua" to "\"Not-A.Brand\";v=\"99\", \"Google Chrome\";v=\"157\", \"Chromium\";v=\"157\"",
-                    "sec-ch-ua-mobile" to "?0",
-                    "sec-ch-ua-platform" to "\"Windows\""
+                    "Cookie" to cookie
                 )).text
                 
                 val m3u8Regex = Regex("""https?://[^"'\\\s]+\.m3u8[^"'\\\s]*""", RegexOption.IGNORE_CASE)
@@ -610,15 +619,7 @@ class SuperembedProvider : MainAPI() {
                     callback(newExtractorLink(this.name, "MultiEmbed ${server.name}", m3u8, ExtractorLinkType.M3U8) {
                         this.referer = playerReferer
                         this.quality = Qualities.Unknown.value
-                        this.headers = mapOf(
-                            "User-Agent" to ua, 
-                            "Referer" to playerReferer, 
-                            "Origin" to playerReferer,
-                            "Cookie" to cookie,
-                            "sec-ch-ua" to "\"Not-A.Brand\";v=\"99\", \"Google Chrome\";v=\"157\", \"Chromium\";v=\"157\"",
-                            "sec-ch-ua-mobile" to "?0",
-                            "sec-ch-ua-platform" to "\"Windows\""
-                        )
+                        this.headers = mapOf("Referer" to playerReferer, "Cookie" to cookie)
                     })
                     ClipboardLogger.logAndCopy("ExtraServer Success", "${server.name}: $m3u8")
                 } else {
@@ -654,7 +655,6 @@ class SuperembedProvider : MainAPI() {
 
         if (type == "tv" && (season == null || episode == null)) return false
 
-        val ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
         val fakeReferer = "https://multiembed.mov/"
 
         val imdbId = imdbCache[tmdbId] ?: ""
@@ -668,7 +668,7 @@ class SuperembedProvider : MainAPI() {
             }
 
             val seen = mutableListOf<String>()
-            val (result, servers) = sniffStream(embedUrl, fakeReferer, ua, seen)
+            val (result, servers) = sniffStream(embedUrl, fakeReferer, seen)
 
             if (result == null) {
                 ClipboardLogger.logAndCopy("Error", "Không bắt được link chính.")
@@ -678,15 +678,10 @@ class SuperembedProvider : MainAPI() {
             val playerReferer = "https://streamingnow.mov/"
             val cookie = CookieManager.getInstance().getCookie(result.url) ?: ""
             
-            // ⭐ BỘ HEADER CHUẨN XÁC ĐỂ VƯỢT LỖI 2004
             val finalHeaders = result.headers.toMutableMap().apply {
-                put("User-Agent", ua)
                 put("Referer", playerReferer)
                 put("Origin", "https://streamingnow.mov")
                 if (cookie.isNotEmpty()) put("Cookie", cookie)
-                put("sec-ch-ua", "\"Not-A.Brand\";v=\"99\", \"Google Chrome\";v=\"157\", \"Chromium\";v=\"157\"")
-                put("sec-ch-ua-mobile", "?0")
-                put("sec-ch-ua-platform", "\"Windows\"")
             }
 
             if (result.url.contains(".m3u8")) {
@@ -707,7 +702,7 @@ class SuperembedProvider : MainAPI() {
             }
 
             if (servers.isNotEmpty()) {
-                extractSpecificServers(servers, ua, subtitleCallback, callback)
+                extractSpecificServers(servers, subtitleCallback, callback)
             }
 
             return true
