@@ -2,6 +2,9 @@ package com.lagradost
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.net.URI
@@ -23,11 +26,28 @@ class MoviesProProvider : MainAPI() {
     private fun absolute(url: String?): String? = url?.takeIf { it.isNotBlank() && it != "#" }?.let {
         try { URI(mainUrl).resolve(it).toString() } catch (_: Exception) { null }
     }
-    private fun document(url: String): org.jsoup.nodes.Document {
+    private suspend fun document(
+        url: String
+    ): org.jsoup.nodes.Document {
         MoviesProClipboardLogger.stage("HTTP/GET", url)
-        val response = app.get(url, headers = mapOf("User-Agent" to ua, "Referer" to "$mainUrl/"))
-        MoviesProClipboardLogger.stage("HTTP/RESULT", "status=${response.code}; final=${response.url}; bytes=${response.text.length}")
-        if (response.code !in 200..299) throw IllegalStateException("HTTP ${response.code} @ $url")
+
+        val response = app.get(
+            url,
+            headers = mapOf(
+                "User-Agent" to ua,
+                "Referer" to "$mainUrl/"
+            )
+        )
+
+        MoviesProClipboardLogger.stage(
+            "HTTP/RESULT",
+            "status=${response.code}; final=${response.url}; bytes=${response.text.length}"
+        )
+
+        if (response.code !in 200..299) {
+            throw IllegalStateException("HTTP ${response.code} @ $url")
+        }
+
         return Jsoup.parse(response.text, response.url.toString())
     }
 
@@ -78,7 +98,7 @@ class MoviesProProvider : MainAPI() {
         return try {
             val url = "$mainUrl/?s=${URLEncoder.encode(query, "UTF-8")}" 
             val doc = document(url)
-            val result = cards(doc).mapNotNull(::toSearch).distinctBy { it.url }
+            val result = cards(doc).mapNotNull(::toSearch).distinctBy { it.data }
             MoviesProClipboardLogger.stage("SEARCH/PARSE", "query=$query; results=${result.size}")
             result
         } catch (e: Exception) {
@@ -128,18 +148,60 @@ class MoviesProProvider : MainAPI() {
                 val label = node.attr("title").ifBlank { node.text().trim() }.ifBlank { "Source ${seen.size}" }
                 MoviesProClipboardLogger.stage("LINKS/CANDIDATE", "$label -> $candidate")
                 try {
-                    if (candidate.contains(".m3u8", true) || candidate.contains(".mpd", true) || candidate.contains(".mp4", true)) {
-                        val kind = if (candidate.contains(".mpd", true)) ExtractorLinkType.DASH else if (candidate.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                        callback.invoke(newExtractorLink(name, label, candidate, kind) { referer = data })
-                        emitted++
-                        MoviesProClipboardLogger.stage("LINKS/DIRECT", "emitted $kind: $candidate")
-                    } else {
-                        val before = emitted
-                        loadExtractor(candidate, data, subtitleCallback) { link ->
-                            callback.invoke(link); emitted++
-                            MoviesProClipboardLogger.stage("EXTRACTOR/VIDEO", "${link.name}; quality=${link.quality}; type=${link.type}; url=${link.url}")
+                    if (
+                        candidate.contains(".m3u8", true) ||
+                        candidate.contains(".mpd", true) ||
+                        candidate.contains(".mp4", true)
+                    ) {
+                        val kind = when {
+                            candidate.contains(".mpd", true) ->
+                                ExtractorLinkType.DASH
+
+                            candidate.contains(".m3u8", true) ->
+                                ExtractorLinkType.M3U8
+
+                            else ->
+                                ExtractorLinkType.VIDEO
                         }
-                        MoviesProClipboardLogger.stage("EXTRACTOR/RESULT", "candidate=$candidate; callbacks=${emitted-before}")
+
+                        callback.invoke(
+                            newExtractorLink(
+                                name,
+                                label,
+                                candidate,
+                                kind
+                            ) {
+                                referer = data
+                            }
+                       )
+
+                       emitted++
+
+                       MoviesProClipboardLogger.stage(
+                           "LINKS/DIRECT",
+                           "emitted $kind: $candidate"
+                       )
+                   } else {
+                       val before = emitted
+
+                       loadExtractor(
+                           candidate,
+                           data,
+                           subtitleCallback
+                       ) { link: ExtractorLink ->
+                           callback.invoke(link)
+                           emitted++
+
+                           MoviesProClipboardLogger.stage(
+                               "EXTRACTOR/VIDEO",
+                               "${link.name}; quality=${link.quality}; type=${link.type}; url=${link.url}"
+                           )
+                       }
+
+                       MoviesProClipboardLogger.stage(
+                           "EXTRACTOR/RESULT",
+                           "candidate=$candidate; callbacks=${emitted-before}"
+                       )
                     }
                 } catch (e: Exception) {
                     MoviesProClipboardLogger.error("candidate/extractor", candidate, e)
