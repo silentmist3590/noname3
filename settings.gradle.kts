@@ -1,5 +1,6 @@
 include(":SuperembedProvider")
 include(":Movieuniverse")
+include(":MoviePro")
 
 
 pluginManagement {
