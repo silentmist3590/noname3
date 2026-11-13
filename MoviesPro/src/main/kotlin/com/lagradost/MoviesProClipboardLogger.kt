@@ -1,12 +1,6 @@
 package com.lagradost
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
-import com.lagradost.cloudstream3.CloudStreamApp
 
 /** Accumulates diagnostics for the current operation and copies the whole buffer after each stage. */
 object MoviesProClipboardLogger {
@@ -24,11 +18,16 @@ object MoviesProClipboardLogger {
         append("ERROR/$stage", message + (throwable?.let { "\n${it.javaClass.simpleName}: ${it.message}\n${it.stackTraceToString().take(2500)}" } ?: ""), true)
     }
 
-    @Synchronized private fun append(stage: String, message: String, isError: Boolean) {
+    @Synchronized
+    private fun append(stage: String, message: String, isError: Boolean) {
         val safe = redact(message).take(9000)
         appendLocked(stage, safe)
-        if (isError) Log.e(TAG, "[$stage] $safe") else Log.d(TAG, "[$stage] $safe")
-        copyLocked()
+
+        if (isError) {
+            Log.e(TAG, "[$stage] $safe")
+        } else {
+            Log.d(TAG, "[$stage] $safe")
+        }
     }
 
     private fun appendLocked(stage: String, message: String) {
@@ -40,15 +39,5 @@ object MoviesProClipboardLogger {
         .replace(Regex("(?i)(token|key|signature|sig|auth|authorization|cookie)=([^&\\s]+)"), "$1=<redacted>")
         .replace(Regex("(?i)(Bearer\\s+)[A-Za-z0-9._~-]+"), "$1<redacted>")
 
-    private fun copyLocked() {
-        try {
-            val ctx = CloudStreamApp.context ?: return
-            val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            val snapshot = buffer.toString()
-            Handler(Looper.getMainLooper()).post {
-                try { cm.setPrimaryClip(ClipData.newPlainText("MoviesPro diagnostics", snapshot)) }
-                catch (e: Exception) { Log.e(TAG, "Clipboard copy failed", e) }
-            }
-        } catch (e: Exception) { Log.e(TAG, "Clipboard unavailable", e) }
-    }
+    
 }
