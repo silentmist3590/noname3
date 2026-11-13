@@ -215,7 +215,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // WEBVIEW SNIFFER (ĐÃ FIX LỖI THREAD KHIẾN WEBVIEW KHÔNG ĐÓNG)
+    // WEBVIEW SNIFFER (FIX LỖI 2004 & TỐI ƯU TV)
     // =====================================================================================
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun sniffStream(
@@ -268,10 +268,16 @@ class SuperembedProvider : MainAPI() {
 
                     fun processFoundUrl(url: String, headers: Map<String, String>) {
                         if (firstStream != null || finished) return
-                        firstStream = SniffResult(url, headers)
+                        
+                        // Lấy Cookie từ WebView để đính kèm
+                        val cookie = CookieManager.getInstance().getCookie(url) ?: ""
+                        val finalHeaders = headers.toMutableMap().apply {
+                            if (cookie.isNotEmpty()) put("Cookie", cookie)
+                        }
+                        
+                        firstStream = SniffResult(url, finalHeaders)
                         ClipboardLogger.logAndCopy("Sniff HIT", "Đã lấy được link: $url")
                         
-                        // ⭐ SỬA LỖI: Chuyển toàn bộ logic đóng WebView về Main Thread
                         handler.post {
                             if (finished) return@post
                             
@@ -294,7 +300,7 @@ class SuperembedProvider : MainAPI() {
                                 } catch (_: Exception) {}
                             }
                             
-                            // ⭐ CƯỠNG CHẾ ĐÓNG SAU 300MS DÙ CÓ LẤY ĐƯỢC SERVER PHỤ HAY KHÔNG
+                            // Đóng WebView sau 300ms để kịp lấy server list
                             handler.postDelayed({
                                 if (!finished) finish()
                             }, 300L)
@@ -315,7 +321,7 @@ class SuperembedProvider : MainAPI() {
                     }
                     wv.setBackgroundColor(Color.BLACK)
 
-                    // Chuột ảo
+                    // Cấu hình Chuột ảo TV
                     cursor.text = "➕"
                     cursor.textSize = 40f
                     cursor.setTextColor(Color.RED)
@@ -371,7 +377,15 @@ class SuperembedProvider : MainAPI() {
                                 val url = msg.removePrefix("HOOK_VIDEO_URL:").trim()
                                 if (url.startsWith("http") && !AD_DOMAINS.any { url.contains(it, true) }) {
                                     ClipboardLogger.logAndCopy("JS Hook", "Phát hiện link: $url")
-                                    val headers = mapOf("Referer" to "https://streamingnow.mov/", "User-Agent" to ua)
+                                    // Tạo headers giả lập trình duyệt để vượt 2004
+                                    val headers = mapOf(
+                                        "Referer" to "https://streamingnow.mov/",
+                                        "Origin" to "https://streamingnow.mov",
+                                        "User-Agent" to ua,
+                                        "sec-ch-ua" to "\"Not-A.Brand\";v=\"99\", \"Google Chrome\";v=\"157\", \"Chromium\";v=\"157\"",
+                                        "sec-ch-ua-mobile" to "?0",
+                                        "sec-ch-ua-platform" to "\"Windows\""
+                                    )
                                     processFoundUrl(url, headers)
                                 }
                             }
@@ -456,7 +470,13 @@ class SuperembedProvider : MainAPI() {
                             }
 
                             if (streamRegex.containsMatchIn(u) && !u.contains("/embed/iframe_player/")) {
-                                val headers = request?.requestHeaders ?: mapOf("Referer" to "https://streamingnow.mov/", "User-Agent" to ua)
+                                val headers = request?.requestHeaders?.toMutableMap() ?: mutableMapOf()
+                                headers["Referer"] = "https://streamingnow.mov/"
+                                headers["Origin"] = "https://streamingnow.mov"
+                                headers["User-Agent"] = ua
+                                headers["sec-ch-ua"] = "\"Not-A.Brand\";v=\"99\", \"Google Chrome\";v=\"157\", \"Chromium\";v=\"157\""
+                                headers["sec-ch-ua-mobile"] = "?0"
+                                headers["sec-ch-ua-platform"] = "\"Windows\""
                                 processFoundUrl(u, headers)
                             }
                             return null
@@ -551,7 +571,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // LẤY LINK TỪ CÁC SERVER PHỤ (Không dùng WebView)
+    // LẤY LINK TỪ CÁC SERVER PHỤ
     // =====================================================================================
     private suspend fun extractSpecificServers(
         servers: List<ServerInfo>,
@@ -562,7 +582,7 @@ class SuperembedProvider : MainAPI() {
         val playerReferer = "https://streamingnow.mov/"
         val cookie = CookieManager.getInstance().getCookie("https://streamingnow.mov/") ?: ""
         
-        val targetNames = listOf("streamwish", "mixdrop", "vipstream")
+        val targetNames = listOf("streamwish", "mixdrop")
         val filteredServers = servers.filter { s -> targetNames.any { s.name.contains(it, true) } }
         
         if (filteredServers.isEmpty()) return
@@ -570,14 +590,17 @@ class SuperembedProvider : MainAPI() {
         ClipboardLogger.logAndCopy("ExtraServers", "Đang thử lấy thêm từ: ${filteredServers.joinToString { it.name }}")
 
         for (server in filteredServers) {
-            if (server.name.contains("vipstream", true)) continue
-
             val serverUrl = "https://streamingnow.mov/playvideo.php?server_id=${server.id}"
             try {
+                // Thêm sec-ch-ua để vượt 403
                 val res = app.get(serverUrl, headers = mapOf(
                     "User-Agent" to ua,
                     "Referer" to playerReferer,
-                    "Cookie" to cookie
+                    "Origin" to playerReferer,
+                    "Cookie" to cookie,
+                    "sec-ch-ua" to "\"Not-A.Brand\";v=\"99\", \"Google Chrome\";v=\"157\", \"Chromium\";v=\"157\"",
+                    "sec-ch-ua-mobile" to "?0",
+                    "sec-ch-ua-platform" to "\"Windows\""
                 )).text
                 
                 val m3u8Regex = Regex("""https?://[^"'\\\s]+\.m3u8[^"'\\\s]*""", RegexOption.IGNORE_CASE)
@@ -587,7 +610,15 @@ class SuperembedProvider : MainAPI() {
                     callback(newExtractorLink(this.name, "MultiEmbed ${server.name}", m3u8, ExtractorLinkType.M3U8) {
                         this.referer = playerReferer
                         this.quality = Qualities.Unknown.value
-                        this.headers = mapOf("User-Agent" to ua, "Referer" to playerReferer, "Cookie" to cookie)
+                        this.headers = mapOf(
+                            "User-Agent" to ua, 
+                            "Referer" to playerReferer, 
+                            "Origin" to playerReferer,
+                            "Cookie" to cookie,
+                            "sec-ch-ua" to "\"Not-A.Brand\";v=\"99\", \"Google Chrome\";v=\"157\", \"Chromium\";v=\"157\"",
+                            "sec-ch-ua-mobile" to "?0",
+                            "sec-ch-ua-platform" to "\"Windows\""
+                        )
                     })
                     ClipboardLogger.logAndCopy("ExtraServer Success", "${server.name}: $m3u8")
                 } else {
@@ -623,7 +654,7 @@ class SuperembedProvider : MainAPI() {
 
         if (type == "tv" && (season == null || episode == null)) return false
 
-        val ua = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        val ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
         val fakeReferer = "https://multiembed.mov/"
 
         val imdbId = imdbCache[tmdbId] ?: ""
@@ -646,11 +677,16 @@ class SuperembedProvider : MainAPI() {
 
             val playerReferer = "https://streamingnow.mov/"
             val cookie = CookieManager.getInstance().getCookie(result.url) ?: ""
+            
+            // ⭐ BỘ HEADER CHUẨN XÁC ĐỂ VƯỢT LỖI 2004
             val finalHeaders = result.headers.toMutableMap().apply {
                 put("User-Agent", ua)
                 put("Referer", playerReferer)
                 put("Origin", "https://streamingnow.mov")
                 if (cookie.isNotEmpty()) put("Cookie", cookie)
+                put("sec-ch-ua", "\"Not-A.Brand\";v=\"99\", \"Google Chrome\";v=\"157\", \"Chromium\";v=\"157\"")
+                put("sec-ch-ua-mobile", "?0")
+                put("sec-ch-ua-platform", "\"Windows\"")
             }
 
             if (result.url.contains(".m3u8")) {
