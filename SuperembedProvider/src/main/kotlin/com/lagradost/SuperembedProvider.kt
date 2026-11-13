@@ -14,6 +14,7 @@ import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
@@ -26,6 +27,8 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
+import android.widget.TextView
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 import org.json.JSONObject
@@ -212,7 +215,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // WEBVIEW SNIFFER (ĐÃ FIX LỖI THREAD)
+    // WEBVIEW SNIFFER & CHUỘT ẢO CHO TV
     // =====================================================================================
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun sniffStream(
@@ -225,7 +228,10 @@ class SuperembedProvider : MainAPI() {
                 if (ctx == null) { cont.resume(Pair(null, emptyList())); return@post }
 
                 try {
+                    val container = FrameLayout(ctx)
                     val wv = WebView(ctx)
+                    val cursor = TextView(ctx)
+
                     var finished = false
                     var isCaptchaActive = false
                     var retryCount = 0
@@ -233,6 +239,10 @@ class SuperembedProvider : MainAPI() {
                     var firstStream: SniffResult? = null
                     var serverList: List<ServerInfo> = emptyList()
                     var hasExtractedServers = false
+
+                    // Biến lưu tọa độ chuột ảo
+                    var cx = 500f
+                    var cy = 500f
 
                     fun finish() {
                         if (finished) return
@@ -242,7 +252,7 @@ class SuperembedProvider : MainAPI() {
                             wv.stopLoading()
                             wv.clearCache(true)
                             wv.clearHistory()
-                            (wv.parent as? ViewGroup)?.removeView(wv)
+                            (container.parent as? ViewGroup)?.removeView(container)
                             wv.destroy()
                             
                             if (ctx.resources.configuration.orientation != originalOrientation) {
@@ -265,6 +275,36 @@ class SuperembedProvider : MainAPI() {
                         cacheMode = WebSettings.LOAD_NO_CACHE
                     }
                     wv.setBackgroundColor(Color.BLACK)
+
+                    // ⭐ CẤU HÌNH CHUỘT ẢO
+                    cursor.text = "➕"
+                    cursor.textSize = 40f
+                    cursor.setTextColor(Color.RED)
+                    cursor.x = cx
+                    cursor.y = cy
+
+                    wv.isFocusable = true
+                    wv.requestFocus()
+                    wv.setOnKeyListener { _, keyCode, event ->
+                        if (event.action == KeyEvent.ACTION_DOWN) {
+                            when (keyCode) {
+                                KeyEvent.KEYCODE_DPAD_UP -> { cy -= 40f; cursor.y = cy; true }
+                                KeyEvent.KEYCODE_DPAD_DOWN -> { cy += 40f; cursor.y = cy; true }
+                                KeyEvent.KEYCODE_DPAD_LEFT -> { cx -= 40f; cursor.x = cx; true }
+                                KeyEvent.KEYCODE_DPAD_RIGHT -> { cx += 40f; cursor.x = cx; true }
+                                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                                    // Gửi cú click (Touch) tại vị trí con trỏ
+                                    sendTouch(wv, cx + 20f, cy + 20f)
+                                    true
+                                }
+                                KeyEvent.KEYCODE_BACK -> {
+                                    finish()
+                                    true
+                                }
+                                else -> false
+                            }
+                        } else false
+                    }
 
                     wv.webChromeClient = object : WebChromeClient() {
                         override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: android.os.Message?): Boolean {
@@ -335,7 +375,6 @@ class SuperembedProvider : MainAPI() {
                                     
                                     if (!hasExtractedServers) {
                                         hasExtractedServers = true
-                                        // ⭐ ĐÃ SỬA LỖI THREAD: Đưa evaluateJavascript về Main Thread
                                         handler.post {
                                             if (!finished) {
                                                 wv.evaluateJavascript(
@@ -382,9 +421,12 @@ class SuperembedProvider : MainAPI() {
                         }
                     }
 
+                    container.addView(wv)
+                    container.addView(cursor)
+
                     val params = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
                     try {
-                        CommonActivity.activity?.addContentView(wv, params)
+                        CommonActivity.activity?.addContentView(container, params)
                     } catch (_: Exception) {}
 
                     val clickRunnable = object : Runnable {
@@ -404,7 +446,6 @@ class SuperembedProvider : MainAPI() {
                                         "var v=document.querySelector('video');if(v){v.muted=true;v.play().catch(function(){});}" +
                                         "})()", null
                                     )
-                                    sendTouch(wv, 540f, 960f)
                                 } catch (_: Exception) {}
                             }
                             handler.postDelayed(this, 2500)
@@ -450,7 +491,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // LẤY LINK TỪ CÁC SERVER ĐƯỢC CHỈ ĐỊNH (Tiết kiệm RAM)
+    // LẤY LINK TỪ CÁC SERVER ĐƯỢC CHỈ ĐỊNH
     // =====================================================================================
     private suspend fun extractSpecificServers(
         servers: List<ServerInfo>,
