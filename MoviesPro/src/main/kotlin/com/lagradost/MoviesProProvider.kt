@@ -98,7 +98,9 @@ class MoviesProProvider : MainAPI() {
         return try {
             val url = "$mainUrl/?s=${URLEncoder.encode(query, "UTF-8")}" 
             val doc = document(url)
-            val result = cards(doc).mapNotNull(::toSearch).distinctBy { it.data }
+            val result: List<SearchResponse> = cards(doc)
+                .mapNotNull { element -> toSearch(element) }
+                .distinctBy { item -> item.url }
             MoviesProClipboardLogger.stage("SEARCH/PARSE", "query=$query; results=${result.size}")
             result
         } catch (e: Exception) {
@@ -118,10 +120,18 @@ class MoviesProProvider : MainAPI() {
             val isTv = url.contains("/tv", true) || doc.text().contains("Episodes", true) || doc.select(".episode, .episodes a").isNotEmpty()
             MoviesProClipboardLogger.stage("DETAIL/PARSE", "title=$title; tv=$isTv; poster=${poster?.isNotBlank()}; episodes=${doc.select(".episode a, .episodes a").size}")
             if (isTv) {
-                val eps = doc.select(".episode a[href], .episodes a[href], a[href*='episode']").mapNotNull { a ->
-                    val epUrl = a.absUrl("href"); if (epUrl.isBlank()) return@mapNotNull null
-                    newEpisode(epUrl) { name = a.text().trim().ifBlank { "Episode" }; posterUrl = poster }
-                }.distinctBy { it.url }
+                val eps: List<Episode> = doc
+                    .select(".episode a[href], .episodes a[href], a[href*='episode']")
+                    .mapNotNull { a ->
+                        val epUrl = a.absUrl("href")
+                        if (epUrl.isBlank()) return@mapNotNull null
+
+                        newEpisode(epUrl) {
+                            name = a.text().trim().ifBlank { "Episode" }
+                            posterUrl = poster
+                        }
+                    }
+                    .distinctBy { it.data }
                 newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps) { this.posterUrl = poster; this.plot = plot; this.year = year }
             } else {
                 newMovieLoadResponse(title, url, TvType.Movie, url) { this.posterUrl = poster; this.plot = plot; this.year = year }
