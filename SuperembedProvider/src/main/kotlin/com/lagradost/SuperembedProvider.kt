@@ -212,7 +212,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // WEBVIEW SNIFFER (NGƯỜI DÙNG TỰ CHỌN SERVER / GIẢI CAPTCHA)
+    // WEBVIEW SNIFFER (ĐÃ FIX LỖI THREAD)
     // =====================================================================================
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun sniffStream(
@@ -335,18 +335,23 @@ class SuperembedProvider : MainAPI() {
                                     
                                     if (!hasExtractedServers) {
                                         hasExtractedServers = true
-                                        view?.evaluateJavascript(
-                                            "(function(){" +
-                                            "var arr=[];" +
-                                            "document.querySelectorAll('ul.sources-list li[data-server]').forEach(function(l){" +
-                                            "  var n=l.querySelector('.server-name');" +
-                                            "  arr.push({id:l.getAttribute('data-server'), name: n ? n.textContent.trim() : l.textContent.trim()});" +
-                                            "});" +
-                                            "return JSON.stringify(arr);" +
-                                            "})()"
-                                        ) { raw ->
-                                            serverList = parseServerList(raw)
-                                            ClipboardLogger.logAndCopy("ServerList", "Tìm thấy ${serverList.size} server.")
+                                        // ⭐ ĐÃ SỬA LỖI THREAD: Đưa evaluateJavascript về Main Thread
+                                        handler.post {
+                                            if (!finished) {
+                                                wv.evaluateJavascript(
+                                                    "(function(){" +
+                                                    "var arr=[];" +
+                                                    "document.querySelectorAll('ul.sources-list li[data-server]').forEach(function(l){" +
+                                                    "  var n=l.querySelector('.server-name');" +
+                                                    "  arr.push({id:l.getAttribute('data-server'), name: n ? n.textContent.trim() : l.textContent.trim()});" +
+                                                    "});" +
+                                                    "return JSON.stringify(arr);" +
+                                                    "})()"
+                                                ) { raw ->
+                                                    serverList = parseServerList(raw)
+                                                    ClipboardLogger.logAndCopy("ServerList", "Tìm thấy ${serverList.size} server.")
+                                                }
+                                            }
                                         }
                                     }
                                     handler.postDelayed({ finish() }, 4000L)
@@ -445,7 +450,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // LẤY LINK TỪ CÁC SERVER ĐƯỢC CHỈ ĐỊNH (Không dùng WebView, tiết kiệm RAM)
+    // LẤY LINK TỪ CÁC SERVER ĐƯỢC CHỈ ĐỊNH (Tiết kiệm RAM)
     // =====================================================================================
     private suspend fun extractSpecificServers(
         servers: List<ServerInfo>,
@@ -456,7 +461,6 @@ class SuperembedProvider : MainAPI() {
         val playerReferer = "https://streamingnow.mov/"
         val cookie = CookieManager.getInstance().getCookie("https://streamingnow.mov/") ?: ""
         
-        // Lọc các server theo yêu cầu
         val targetNames = listOf("streamwish", "mixdrop", "vipstream")
         val filteredServers = servers.filter { s -> targetNames.any { s.name.contains(it, true) } }
         
@@ -465,7 +469,6 @@ class SuperembedProvider : MainAPI() {
         ClipboardLogger.logAndCopy("ExtraServers", "Đang thử lấy thêm từ: ${filteredServers.joinToString { it.name }}")
 
         for (server in filteredServers) {
-            // Bỏ qua vipstream vì nó yêu cầu captcha và người dùng đã tự chọn trên WebView
             if (server.name.contains("vipstream", true)) continue
 
             val serverUrl = "https://streamingnow.mov/playvideo.php?server_id=${server.id}"
@@ -566,7 +569,6 @@ class SuperembedProvider : MainAPI() {
                 })
             }
 
-            // Tự động bắt thêm streamwish và mixdrop
             if (servers.isNotEmpty()) {
                 extractSpecificServers(servers, ua, subtitleCallback, callback)
             }
