@@ -257,7 +257,9 @@ class SuperembedProvider : MainAPI() {
                             wv.destroy()
                             
                             (container.parent as? ViewGroup)?.removeView(container)
-                            val root = ctx.window?.decorView as? ViewGroup
+                            
+                            // Sửa lỗi Unresolved reference 'window'
+                            val root = CommonActivity.activity?.window?.decorView as? ViewGroup
                             root?.removeView(container)
                             
                             if (ctx.resources.configuration.orientation != originalOrientation) {
@@ -398,7 +400,7 @@ class SuperembedProvider : MainAPI() {
                                         }
                                     }
                                     
-                                    // ⭐ THAY ĐỔI: Rút ngắn thời gian chờ xuống 0.8s để chuyển ngay sang CloudStream
+                                    // ⭐ RÚT NGẮN THỜI GIAN CHỜ ĐỂ TRÁNH GIẬT LAG
                                     handler.postDelayed({ 
                                         Toast.makeText(ctx, "Đã bắt được link, chuyển sang trình phát...", Toast.LENGTH_SHORT).show()
                                         finish() 
@@ -519,7 +521,6 @@ class SuperembedProvider : MainAPI() {
         ClipboardLogger.logAndCopy("ExtraServers", "Đang thử lấy thêm từ: ${filteredServers.joinToString { it.name }}")
 
         for (server in filteredServers) {
-            // Vipstream yêu cầu captcha nên bỏ qua ở bước HTTP này
             if (server.name.contains("vipstream", true)) continue
 
             val serverUrl = "https://streamingnow.mov/playvideo.php?server_id=${server.id}"
