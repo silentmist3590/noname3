@@ -8,14 +8,13 @@ import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.utils.Qualities
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
-import android.os.Message
 import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
-import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
@@ -47,10 +46,8 @@ private fun parseRef(s: String): Ref? {
     return Ref(m.groupValues[1], id, m.groupValues[3].toIntOrNull(), m.groupValues[4].toIntOrNull())
 }
 
-// Cấu trúc kết quả bắt được
 private data class SniffResult(val url: String, val headers: Map<String, String>)
 
-// Danh sách đen quảng cáo
 private val AD_DOMAINS = listOf(
     "doubleclick.net", "googlesyndication.com", "googleadservices.com",
     "popads.net", "onclickads.net", "propellerads.com", "popcash.net",
@@ -65,9 +62,6 @@ private val AD_DOMAINS = listOf(
     "5gvci.com", "sw.js", "dd.js"
 )
 
-// =====================================================================================
-// 2. API SERVICES
-// =====================================================================================
 object ApiServices {
     suspend fun getTmdbDetails(type: String, tmdbId: Int): JSONObject? {
         return try {
@@ -98,9 +92,6 @@ object ApiServices {
     }
 }
 
-// =====================================================================================
-// 3. LỚP PROVIDER CHÍNH
-// =====================================================================================
 class SuperembedProvider : MainAPI() {
     override var mainUrl = BASE_URL
     override var name = "MultiEmbed"
@@ -209,7 +200,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // WEBVIEW SNIFFER
+    // HIỂN THỊ WEBVIEW CHO NGƯỜI DÙNG GIẢI CAPTCHA VÀ TỰ ĐỘNG BẮT LINK M3U8
     // =====================================================================================
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun sniffStream(
@@ -219,15 +210,12 @@ class SuperembedProvider : MainAPI() {
             val handler = Handler(Looper.getMainLooper())
             handler.post {
                 val ctx: Context? = CommonActivity.activity
-                if (ctx == null) { 
-                    ClipboardLogger.logAndCopy("Error", "No Context")
-                    cont.resume(null); return@post 
-                }
+                if (ctx == null) { cont.resume(null); return@post }
 
                 try {
                     val wv = WebView(ctx)
                     var finished = false
-                    var clickCount = 0
+                    var isCaptchaActive = false
 
                     fun finish(res: SniffResult?) {
                         if (finished) return
@@ -237,7 +225,7 @@ class SuperembedProvider : MainAPI() {
                         cont.resume(res)
                     }
 
-                    val streamRegex = Regex("""\.m3u8|\.mpd|master\.txt""", RegexOption.IGNORE_CASE)
+                    val streamRegex = Regex("""\.m3u8|\.mpd|master\.txt|\.mp4""", RegexOption.IGNORE_CASE)
 
                     wv.settings.apply {
                         javaScriptEnabled = true
@@ -249,8 +237,11 @@ class SuperembedProvider : MainAPI() {
                         mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                     }
 
+                    // WebView nền đen, hiển thị rõ ràng
+                    wv.setBackgroundColor(Color.BLACK)
+
                     wv.webChromeClient = object : WebChromeClient() {
-                        override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message?): Boolean {
+                        override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: android.os.Message?): Boolean {
                             val popup = WebView(ctx)
                             popup.webViewClient = object : WebViewClient() {
                                 override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
@@ -260,23 +251,30 @@ class SuperembedProvider : MainAPI() {
                             val transport = resultMsg?.obj as? WebView.WebViewTransport
                             transport?.webView = popup
                             resultMsg?.sendToTarget()
-                            handler.postDelayed({ try { popup.destroy() } catch (_: Exception) {} }, 2000)
+                            handler.postDelayed({ try { popup.destroy() } catch (_: Exception) {} }, 1000)
                             return true
                         }
                     }
 
                     wv.webViewClient = object : WebViewClient() {
                         override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                            ClipboardLogger.logAndCopy("Page Started", "$url")
+                            // Chỉ theo dõi DOM để biết khi nào có captcha, không can thiệp sâu
                             val js = """
                                 (function() {
-                                    try { Object.defineProperty(navigator, 'webdriver', {get: () => undefined}); } catch(e) {}
-                                    try { window.chrome = { runtime: {} }; } catch(e) {}
+                                    setInterval(function() {
+                                        var isCaptcha = document.body.innerText.includes('Select all images') || 
+                                                        document.body.innerText.includes('Verification') ||
+                                                        document.querySelector('.cf-turnstile') !== null ||
+                                                        document.querySelector('.captcha-holder') !== null;
+                                        if (isCaptcha) {
+                                            if (!window.__isCap) { window.__isCap = true; console.log("CAPTCHA_ON"); }
+                                        } else {
+                                            if (window.__isCap) { window.__isCap = false; console.log("CAPTCHA_OFF"); }
+                                        }
+                                    }, 1000);
                                 })();
                             """.trimIndent()
                             view?.evaluateJavascript(js, null)
-                            
-                            startAutoClick(wv, handler) { clickCount++ }
                         }
 
                         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
@@ -286,11 +284,11 @@ class SuperembedProvider : MainAPI() {
                                 return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream("".toByteArray()))
                             }
 
-                            // Ghi log tất cả request (trừ ảnh/css) để debug
-                            if (!u.contains(".png") && !u.contains(".jpg") && !u.contains(".css") && !u.contains(".js") && seen.size < 100) {
+                            if (!u.contains(".png") && !u.contains(".jpg") && !u.contains(".css") && !u.contains(".js") && seen.size < 150) {
                                 seen.add(u.take(150))
                             }
 
+                            // BẮT LINK VIDEO
                             if (streamRegex.containsMatchIn(u) && !u.contains("/embed/iframe_player/")) {
                                 val reqHeaders = request?.requestHeaders ?: emptyMap()
                                 ClipboardLogger.logAndCopy("Sniff HIT", "Bắt được: $u")
@@ -301,14 +299,13 @@ class SuperembedProvider : MainAPI() {
 
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                             val u = request?.url?.toString() ?: return false
-                            ClipboardLogger.logAndCopy("Nav", "shouldOverride: $u")
                             if (AD_DOMAINS.any { u.contains(it, ignoreCase = true) }) return true
                             if (!u.startsWith("http")) return true
                             return false
                         }
 
                         override fun onPageFinished(view: WebView?, url: String?) {
-                            ClipboardLogger.logAndCopy("Page Finished", "$url")
+                            ClipboardLogger.logAndCopy("Loaded", "$url")
                         }
 
                         override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
@@ -318,59 +315,55 @@ class SuperembedProvider : MainAPI() {
                         }
                     }
 
-                    wv.measure(View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY))
-                    wv.layout(0, 0, 1080, 1920)
-                    wv.translationX = -4000f
+                    // Toàn màn hình, không giấu WebView đi
+                    val params = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
                     try {
-                        CommonActivity.activity?.addContentView(wv, ViewGroup.LayoutParams(1080, 1920))
-                    } catch (e: Exception) {
-                        ClipboardLogger.logAndCopy("AddView Error", e.message ?: "Unknown")
-                    }
+                        CommonActivity.activity?.addContentView(wv, params)
+                    } catch (_: Exception) {}
 
-                    handler.postDelayed({ 
-                        if (!finished) {
-                            ClipboardLogger.logAndCopy("Timeout", "Seen:\n${seen.takeLast(10).joinToString("\n")}")
-                            finish(null) 
+                    // Nếu là captcha, nhường quyền cho user. Nếu không, tự động click để phát video.
+                    val clickRunnable = object : Runnable {
+                        override fun run() {
+                            if (finished) return
+                            
+                            // Nếu không có captcha, tự động click để kích hoạt server
+                            if (!isCaptchaActive) {
+                                try {
+                                    wv.evaluateJavascript(
+                                        "(function(){" +
+                                        "var els=document.querySelectorAll('button,div,span,a,video');" +
+                                        "for(var i=0;i<els.length;i++){" +
+                                        "  var el=els[i];var txt=el.innerText||'';var cls=typeof el.className==='string'?el.className:'';" +
+                                        // Click nút Play
+                                        "  if(txt.indexOf('Play')!==-1||cls.indexOf('play')!==-1||cls.indexOf('jw-icon')!==-1){" +
+                                        "    try{el.click();}catch(e){}" +
+                                        "  }" +
+                                        "}" +
+                                        "var v=document.querySelector('video');if(v){v.muted=true;v.play().catch(function(){});}" +
+                                        "})()", null
+                                    )
+                                    // Click vật lý (nếu cần)
+                                    sendTouch(wv, 540f, 960f)
+                                } catch (_: Exception) {}
+                            }
+                            
+                            handler.postDelayed(this, 2500)
                         }
-                    }, 60_000L)
+                    }
+                    handler.postDelayed(clickRunnable, 2000)
 
-                    ClipboardLogger.logAndCopy("Loading URL", pageUrl)
+                    // Timeout tổng 3 phút
+                    handler.postDelayed({ 
+                        if (!finished) finish(null) 
+                    }, 180_000L)
+
+                    // Load trang
                     wv.loadUrl(pageUrl, mapOf("Referer" to referer))
                 } catch (e: Exception) {
-                    ClipboardLogger.logAndCopy("Exception", e.message ?: "Unknown")
                     cont.resume(null)
                 }
             }
         }
-    }
-
-    private fun startAutoClick(wv: WebView, handler: Handler, onTick: () -> Unit) {
-        var count = 0
-        val runnable = object : Runnable {
-            override fun run() {
-                if (count >= 40) return
-                count++
-                onTick()
-                try {
-                    wv.evaluateJavascript(
-                        "(function(){" +
-                        "var els=document.querySelectorAll('button,div,span,a,video');" +
-                        "for(var i=0;i<els.length;i++){" +
-                        "  var el=els[i];var txt=el.innerText||'';var cls=typeof el.className==='string'?el.className:'';" +
-                        "  if(txt.indexOf('Play')!==-1||cls.indexOf('play')!==-1||cls.indexOf('jw-icon')!==-1){" +
-                        "    try{el.click();}catch(e){}" +
-                        "  }" +
-                        "}" +
-                        "var v=document.querySelector('video');if(v){v.muted=true;v.play().catch(function(){});}" +
-                        "})()", null
-                    )
-                    sendTouch(wv, 540f, 960f)
-                } catch (_: Exception) {}
-                
-                handler.postDelayed(this, 1500)
-            }
-        }
-        handler.postDelayed(runnable, 1000)
     }
 
     private fun sendTouch(wv: WebView, x: Float, y: Float) {
@@ -403,7 +396,7 @@ class SuperembedProvider : MainAPI() {
 
         if (type == "tv" && (season == null || episode == null)) return false
 
-        val ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
+        val ua = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
         val fakeReferer = "https://multiembed.mov/"
 
         val imdbId = imdbCache[tmdbId] ?: ""
@@ -420,7 +413,7 @@ class SuperembedProvider : MainAPI() {
             val result = sniffStream(embedUrl, fakeReferer, ua, seen)
 
             if (result == null) {
-                ClipboardLogger.logAndCopy("Error", "Không bắt được link.")
+                ClipboardLogger.logAndCopy("Error", "Không bắt được link.\nSeen:\n${seen.takeLast(10).joinToString("\n")}")
                 return false
             }
 
