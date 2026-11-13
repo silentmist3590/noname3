@@ -29,9 +29,6 @@ import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.net.URLEncoder
 
-// =====================================================================================
-// 1. CẤU HÌNH
-// =====================================================================================
 private const val BASE_URL = "https://multiembed.mov"
 private const val TMDB_BASE_URL = "https://tmdb-proxy.silentmist3590.workers.dev/3"
 private const val TMDB_API_KEY = "c3d997893bf55c01f39f821b53781547"
@@ -199,9 +196,6 @@ class SuperembedProvider : MainAPI() {
         }
     }
 
-    // =====================================================================================
-    // HIỂN THỊ WEBVIEW CHO NGƯỜI DÙNG GIẢI CAPTCHA VÀ TỰ ĐỘNG BẮT LINK M3U8
-    // =====================================================================================
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun sniffStream(
         pageUrl: String, referer: String, ua: String, seen: MutableList<String>
@@ -216,6 +210,7 @@ class SuperembedProvider : MainAPI() {
                     val wv = WebView(ctx)
                     var finished = false
                     var isCaptchaActive = false
+                    var retryCount = 0
 
                     fun finish(res: SniffResult?) {
                         if (finished) return
@@ -236,8 +231,6 @@ class SuperembedProvider : MainAPI() {
                         userAgentString = ua
                         mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                     }
-
-                    // WebView nền đen, hiển thị rõ ràng
                     wv.setBackgroundColor(Color.BLACK)
 
                     wv.webChromeClient = object : WebChromeClient() {
@@ -258,7 +251,6 @@ class SuperembedProvider : MainAPI() {
 
                     wv.webViewClient = object : WebViewClient() {
                         override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                            // Chỉ theo dõi DOM để biết khi nào có captcha, không can thiệp sâu
                             val js = """
                                 (function() {
                                     setInterval(function() {
@@ -288,7 +280,6 @@ class SuperembedProvider : MainAPI() {
                                 seen.add(u.take(150))
                             }
 
-                            // BẮT LINK VIDEO
                             if (streamRegex.containsMatchIn(u) && !u.contains("/embed/iframe_player/")) {
                                 val reqHeaders = request?.requestHeaders ?: emptyMap()
                                 ClipboardLogger.logAndCopy("Sniff HIT", "Bắt được: $u")
@@ -310,23 +301,29 @@ class SuperembedProvider : MainAPI() {
 
                         override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
                             if (request?.isForMainFrame == true) {
-                                ClipboardLogger.logAndCopy("WebView Error", "${request.url.host}: ${error?.errorCode} ${error?.description}")
+                                val desc = error?.description?.toString() ?: ""
+                                ClipboardLogger.logAndCopy("WebView Error", "${request.url.host}: ${error?.errorCode} $desc")
+                                
+                                // ⭐ TỰ ĐỘNG RETRY NẾU GẶP LỖI QUIC HOẶC MẤT KẾT NỐI
+                                if (retryCount < 3 && (desc.contains("QUIC", true) || error?.errorCode == -1 || error?.errorCode == -6)) {
+                                    retryCount++
+                                    ClipboardLogger.logAndCopy("Retry", "Lỗi mạng, thử tải lại lần $retryCount...")
+                                    handler.postDelayed({
+                                        wv.loadUrl(pageUrl, mapOf("Referer" to referer))
+                                    }, 1500)
+                                }
                             }
                         }
                     }
 
-                    // Toàn màn hình, không giấu WebView đi
                     val params = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
                     try {
                         CommonActivity.activity?.addContentView(wv, params)
                     } catch (_: Exception) {}
 
-                    // Nếu là captcha, nhường quyền cho user. Nếu không, tự động click để phát video.
                     val clickRunnable = object : Runnable {
                         override fun run() {
                             if (finished) return
-                            
-                            // Nếu không có captcha, tự động click để kích hoạt server
                             if (!isCaptchaActive) {
                                 try {
                                     wv.evaluateJavascript(
@@ -334,7 +331,6 @@ class SuperembedProvider : MainAPI() {
                                         "var els=document.querySelectorAll('button,div,span,a,video');" +
                                         "for(var i=0;i<els.length;i++){" +
                                         "  var el=els[i];var txt=el.innerText||'';var cls=typeof el.className==='string'?el.className:'';" +
-                                        // Click nút Play
                                         "  if(txt.indexOf('Play')!==-1||cls.indexOf('play')!==-1||cls.indexOf('jw-icon')!==-1){" +
                                         "    try{el.click();}catch(e){}" +
                                         "  }" +
@@ -342,22 +338,19 @@ class SuperembedProvider : MainAPI() {
                                         "var v=document.querySelector('video');if(v){v.muted=true;v.play().catch(function(){});}" +
                                         "})()", null
                                     )
-                                    // Click vật lý (nếu cần)
                                     sendTouch(wv, 540f, 960f)
                                 } catch (_: Exception) {}
                             }
-                            
                             handler.postDelayed(this, 2500)
                         }
                     }
                     handler.postDelayed(clickRunnable, 2000)
 
-                    // Timeout tổng 3 phút
+                    // Tăng timeout lên 5 phút để đủ thời gian cho user giải captcha và retry
                     handler.postDelayed({ 
                         if (!finished) finish(null) 
-                    }, 180_000L)
+                    }, 300_000L)
 
-                    // Load trang
                     wv.loadUrl(pageUrl, mapOf("Referer" to referer))
                 } catch (e: Exception) {
                     cont.resume(null)
@@ -377,9 +370,6 @@ class SuperembedProvider : MainAPI() {
         } catch (_: Exception) {}
     }
 
-    // =====================================================================================
-    // LOAD LINKS
-    // =====================================================================================
     override suspend fun loadLinks(
         data: String, isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
