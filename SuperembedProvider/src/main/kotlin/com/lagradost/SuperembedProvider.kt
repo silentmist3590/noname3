@@ -497,7 +497,7 @@ class SuperembedProvider : MainAPI() {
                                                                 shown = true
                                                                 ClipboardLogger.logAndCopy("Captcha", "Hiện WebView cho người dùng xác minh: $nm")
                                                                 try {
-                                                                    wv.layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+                                                                    wv.layoutParams = android.widget.FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
                                                                     wv.translationX = 0f
                                                                     wv.bringToFront()
                                                                     wv.requestLayout()
