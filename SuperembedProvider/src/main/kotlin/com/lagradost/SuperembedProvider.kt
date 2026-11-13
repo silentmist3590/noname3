@@ -461,7 +461,8 @@ class SuperembedProvider : MainAPI() {
                                                     cb(try { org.json.JSONArray("[" + (raw2 ?: "\"\"") + "]").optString(0) } catch (_: Exception) { raw2 ?: "" })
                                                 }
                                             }
-                                            var shown = false
+                                            var timeouts = 0
+                                            var okStreak = 0
                                             var i = 0
                                             fun step() {
                                                 if (finished) return
@@ -493,25 +494,27 @@ class SuperembedProvider : MainAPI() {
                                                         val inner = head.substringAfter("|", "").split(" ").filter { it.startsWith("http") }
                                                         val all = (inner + useful).distinct()
                                                         if (isCap) {
-                                                            if (!shown) {
-                                                                shown = true
+                                                            if (timeouts < 2) {
                                                                 ClipboardLogger.logAndCopy("Captcha", "Hiện WebView cho người dùng xác minh: $nm")
                                                                 try {
                                                                     wv.layoutParams = android.widget.FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
                                                                     wv.translationX = 0f
                                                                     wv.bringToFront()
                                                                     wv.requestLayout()
-                                                                    Toast.makeText(wv.context, "Hãy giải captcha trong khung hiện ra (tối đa 60 giây)", Toast.LENGTH_LONG).show()
+                                                                    Toast.makeText(wv.context, "Server $nm cần captcha: hãy giải trong khung hiện ra (tối đa 45 giây)", Toast.LENGTH_LONG).show()
                                                                 } catch (_: Throwable) {}
                                                                 var waited = 0
                                                                 fun poll() {
                                                                     if (finished) return
                                                                     inspect { t2 ->
-                                                                        if (!t2.startsWith("CAPTCHA")) {
+                                                                        if (t2.startsWith("OK")) okStreak++ else okStreak = 0
+                                                                        if (waited % 10_000 == 0) ClipboardLogger.logAndCopy("Chờ captcha $nm", "${waited / 1000}s | ${t2.substringBefore("§§").take(100)}")
+                                                                        if (okStreak >= 2) {
+                                                                            okStreak = 0; timeouts = 0
                                                                             ClipboardLogger.logAndCopy("Captcha", "Đã xác minh, quét lại $nm")
-                                                                            i--
-                                                                            handler.postDelayed({ step() }, 500L)
-                                                                        } else if (waited >= 60_000) {
+                                                                            handle(t2)
+                                                                        } else if (waited >= 45_000) {
+                                                                            timeouts++
                                                                             captcha.add(nm)
                                                                             ClipboardLogger.logAndCopy("Server $nm", "CAPTCHA - hết giờ, bỏ qua")
                                                                             step()
@@ -526,6 +529,11 @@ class SuperembedProvider : MainAPI() {
                                                             }
                                                             captcha.add(nm)
                                                             ClipboardLogger.logAndCopy("Server $nm", "CAPTCHA - bỏ qua")
+                                                        } else if (t.contains("Error 1015") || t.contains("rate limited", true) || html.contains("1015")) {
+                                                            ClipboardLogger.logAndCopy("Server $nm", "RATE LIMIT Cloudflare 1015 - chờ 25s rồi thử lại")
+                                                            i--
+                                                            handler.postDelayed({ step() }, 25_000L)
+                                                            return
                                                         } else {
                                                             servers.add(nm to all)
                                                             ClipboardLogger.logAndCopy("Server $nm", (if (t.startsWith("ERR") || t == "noframe") "[$t] " else "OK ") + all.take(8).joinToString("\n").ifEmpty { "(không có link)" })
@@ -534,7 +542,7 @@ class SuperembedProvider : MainAPI() {
                                                                 ClipboardLogger.logAndCopy("Req $nm", got.filter { !junkRegex.containsMatchIn(it) }.takeLast(15).joinToString("\n") { it.take(200) })
                                                             }
                                                         }
-                                                        step()
+                                                        handler.postDelayed({ step() }, 3000L)
                                                     }
                                                     inspect { handle(it) }
                                                 }, 5000L)
@@ -621,7 +629,7 @@ class SuperembedProvider : MainAPI() {
                     } catch (_: Exception) {}
 
                     // Tổng timeout 120 giây (giảm từ 180s vì click ít hơn)
-                    handler.postDelayed({ finish(null) }, 240_000L)
+                    handler.postDelayed({ finish(null) }, 600_000L)
                     wv.loadUrl(pageUrl, mapOf("Referer" to referer))
 
                 } catch (e: Exception) {
