@@ -29,6 +29,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.TextView
+import android.widget.Toast
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 import org.json.JSONObject
@@ -240,7 +241,6 @@ class SuperembedProvider : MainAPI() {
                     var serverList: List<ServerInfo> = emptyList()
                     var hasExtractedServers = false
 
-                    // Biến lưu tọa độ chuột ảo
                     var cx = 500f
                     var cy = 500f
 
@@ -249,11 +249,16 @@ class SuperembedProvider : MainAPI() {
                         finished = true
                         handler.removeCallbacksAndMessages(null)
                         try {
+                            // ⭐ CƯỠNG CHẾ HỦY WEBVIEW ĐỂ GIẢI PHÓNG RAM
                             wv.stopLoading()
-                            wv.clearCache(true)
+                            wv.loadUrl("about:blank")
                             wv.clearHistory()
-                            (container.parent as? ViewGroup)?.removeView(container)
+                            wv.clearCache(true)
                             wv.destroy()
+                            
+                            (container.parent as? ViewGroup)?.removeView(container)
+                            val root = ctx.window?.decorView as? ViewGroup
+                            root?.removeView(container)
                             
                             if (ctx.resources.configuration.orientation != originalOrientation) {
                                 CommonActivity.activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
@@ -276,7 +281,7 @@ class SuperembedProvider : MainAPI() {
                     }
                     wv.setBackgroundColor(Color.BLACK)
 
-                    // ⭐ CẤU HÌNH CHUỘT ẢO
+                    // Cấu hình Chuột ảo
                     cursor.text = "➕"
                     cursor.textSize = 40f
                     cursor.setTextColor(Color.RED)
@@ -293,7 +298,6 @@ class SuperembedProvider : MainAPI() {
                                 KeyEvent.KEYCODE_DPAD_LEFT -> { cx -= 40f; cursor.x = cx; true }
                                 KeyEvent.KEYCODE_DPAD_RIGHT -> { cx += 40f; cursor.x = cx; true }
                                 KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
-                                    // Gửi cú click (Touch) tại vị trí con trỏ
                                     sendTouch(wv, cx + 20f, cy + 20f)
                                     true
                                 }
@@ -393,7 +397,12 @@ class SuperembedProvider : MainAPI() {
                                             }
                                         }
                                     }
-                                    handler.postDelayed({ finish() }, 4000L)
+                                    
+                                    // ⭐ THAY ĐỔI: Rút ngắn thời gian chờ xuống 0.8s để chuyển ngay sang CloudStream
+                                    handler.postDelayed({ 
+                                        Toast.makeText(ctx, "Đã bắt được link, chuyển sang trình phát...", Toast.LENGTH_SHORT).show()
+                                        finish() 
+                                    }, 800L)
                                 }
                             }
                             return null
@@ -491,7 +500,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // LẤY LINK TỪ CÁC SERVER ĐƯỢC CHỈ ĐỊNH
+    // LẤY LINK TỪ CÁC SERVER PHỤ (Không dùng WebView)
     // =====================================================================================
     private suspend fun extractSpecificServers(
         servers: List<ServerInfo>,
@@ -510,6 +519,7 @@ class SuperembedProvider : MainAPI() {
         ClipboardLogger.logAndCopy("ExtraServers", "Đang thử lấy thêm từ: ${filteredServers.joinToString { it.name }}")
 
         for (server in filteredServers) {
+            // Vipstream yêu cầu captcha nên bỏ qua ở bước HTTP này
             if (server.name.contains("vipstream", true)) continue
 
             val serverUrl = "https://streamingnow.mov/playvideo.php?server_id=${server.id}"
