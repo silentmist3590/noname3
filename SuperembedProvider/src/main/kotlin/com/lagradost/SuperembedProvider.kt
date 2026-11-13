@@ -216,7 +216,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // WEBVIEW SNIFFER (FIX LỖI CLOUDFLARE - KHÔNG GIẢ LẬP)
+    // WEBVIEW SNIFFER (ĐÃ NÂNG CẤP VỚI MOTION EVENT)
     // =====================================================================================
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun sniffStream(
@@ -338,7 +338,8 @@ class SuperembedProvider : MainAPI() {
                                 KeyEvent.KEYCODE_DPAD_LEFT -> { cx -= 40f; cursor.x = cx; true }
                                 KeyEvent.KEYCODE_DPAD_RIGHT -> { cx += 40f; cursor.x = cx; true }
                                 KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
-                                    sendRealTouch(wv, cx + 20f, cy + 20f, handler)
+                                    // ⭐ GỌI HÀM MOTION EVENT KHI BẤM NÚT OK
+                                    sendRealMotionEvent(wv, cx + 20f, cy + 20f, handler)
                                     true
                                 }
                                 KeyEvent.KEYCODE_BACK -> {
@@ -504,6 +505,7 @@ class SuperembedProvider : MainAPI() {
                             if (finished || firstStream != null) return
                             if (!isCaptchaActive) {
                                 try {
+                                    // ⭐ KẾT HỢP JS CLICK VÀ MOTION EVENT
                                     wv.evaluateJavascript(
                                         "(function(){" +
                                         "var els=document.querySelectorAll('button,div,span,a,video');" +
@@ -515,9 +517,11 @@ class SuperembedProvider : MainAPI() {
                                         "}" +
                                         "})()", null
                                     )
+                                    // Gửi thêm MotionEvent để đánh lừa player
+                                    sendRealMotionEvent(wv, 540f, 960f, handler)
                                 } catch (_: Exception) {}
                             }
-                            handler.postDelayed(this, 2000)
+                            handler.postDelayed(this, 2500)
                         }
                     }
                     handler.postDelayed(clickRunnable, 2000)
@@ -532,38 +536,26 @@ class SuperembedProvider : MainAPI() {
         }
     }
 
-    // ⭐ ĐÃ SỬA LỖI: Sử dụng MotionEvent.obtain đầy đủ tham số (bao gồm pressure và size)
-    private fun sendRealTouch(wv: WebView, x: Float, y: Float, handler: Handler) {
-        val downTime = SystemClock.uptimeMillis()
-        
-        val down = MotionEvent.obtain(
-            downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 
-            0.7f, // pressure
-            0.1f, // size
-            0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0
-        )
-        wv.dispatchTouchEvent(down)
-        down.recycle()
+    // ⭐ SỬ DỤNG MOTION EVENT (GIỐNG PLUGIN VIDSRCSU CŨ)
+    private fun sendRealMotionEvent(wv: WebView, x: Float, y: Float, handler: Handler) {
+        try {
+            val downTime = SystemClock.uptimeMillis()
+            
+            // ACTION_DOWN
+            val down = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 0)
+            down.source = InputDevice.SOURCE_TOUCHSCREEN
+            wv.dispatchTouchEvent(down)
+            down.recycle()
 
-        handler.postDelayed({
-            val moveTime = SystemClock.uptimeMillis()
-            val move = MotionEvent.obtain(
-                downTime, moveTime, MotionEvent.ACTION_MOVE, x + 1f, y + 1f, 
-                0.6f, 0.1f, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0
-            )
-            wv.dispatchTouchEvent(move)
-            move.recycle()
-        }, 30)
-
-        handler.postDelayed({
-            val upTime = SystemClock.uptimeMillis()
-            val up = MotionEvent.obtain(
-                downTime, upTime, MotionEvent.ACTION_UP, x, y, 
-                0.0f, 0.1f, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0
-            )
-            wv.dispatchTouchEvent(up)
-            up.recycle()
-        }, 100)
+            // ACTION_UP
+            handler.postDelayed({
+                val upTime = SystemClock.uptimeMillis()
+                val up = MotionEvent.obtain(downTime, upTime, MotionEvent.ACTION_UP, x, y, 0)
+                up.source = InputDevice.SOURCE_TOUCHSCREEN
+                wv.dispatchTouchEvent(up)
+                up.recycle()
+            }, 60)
+        } catch (_: Exception) {}
     }
 
     private fun parseServerList(raw: String?): List<ServerInfo> {
