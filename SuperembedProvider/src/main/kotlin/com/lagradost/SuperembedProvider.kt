@@ -244,8 +244,6 @@ class SuperembedProvider : MainAPI() {
                     var cx = 500f
                     var cy = 500f
 
-                    // ⭐ LẤY USER-AGENT THỰC CỦA THIẾT BỊ (Không hardcode Windows)
-                    // Giúp Cloudflare thấy đây là trình duyệt Android thật, đồng bộ với Client Hints
                     val realUa = wv.settings.userAgentString
 
                     fun finish() {
@@ -304,7 +302,6 @@ class SuperembedProvider : MainAPI() {
                                 } catch (_: Exception) {}
                             }
                             
-                            // Đóng WebView sau 300ms
                             handler.postDelayed({
                                 if (!finished) finish()
                             }, 300L)
@@ -321,7 +318,6 @@ class SuperembedProvider : MainAPI() {
                         setSupportMultipleWindows(true)
                         mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                         cacheMode = WebSettings.LOAD_NO_CACHE
-                        // ⭐ KHÔNG SET userAgentString, ĐỂ WEBVIEW DÙNG UA MẶC ĐỊNH CỦA HỆ THỐNG
                     }
                     wv.setBackgroundColor(Color.BLACK)
 
@@ -395,7 +391,6 @@ class SuperembedProvider : MainAPI() {
 
                     wv.webViewClient = object : WebViewClient() {
                         override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                            // ⭐ KHÔNG DÙNG ANTI-BOT JS, CHỈ DÙNG JS BẮT LINK VÀ THEO DÕI CAPTCHA
                             val js = """
                                 (function() {
                                     if (window.fetch) {
@@ -529,7 +524,6 @@ class SuperembedProvider : MainAPI() {
 
                     handler.postDelayed({ if (!finished) finish() }, 180_000L)
                     
-                    // ⭐ LOAD URL KHÔNG KÈM HEADER REFERER LẠ (Tránh Cloudflare nghi ngờ)
                     wv.loadUrl(pageUrl)
                 } catch (e: Exception) {
                     cont.resume(Pair(null, emptyList()))
@@ -538,31 +532,35 @@ class SuperembedProvider : MainAPI() {
         }
     }
 
-    // ⭐ GỬI SỰ KIỆN CHẠM CHUẨN XÁC NHƯ NGÓN TAY THẬT (ĐỂ CLOUDFLARE CHẤP NHẬN)
+    // ⭐ ĐÃ SỬA LỖI: Sử dụng MotionEvent.obtain đầy đủ tham số (bao gồm pressure và size)
     private fun sendRealTouch(wv: WebView, x: Float, y: Float, handler: Handler) {
         val downTime = SystemClock.uptimeMillis()
         
-        val down = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 0)
-        down.source = InputDevice.SOURCE_TOUCHSCREEN
-        down.setPressure(0.7f)
-        down.setSize(0.1f)
+        val down = MotionEvent.obtain(
+            downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 
+            0.7f, // pressure
+            0.1f, // size
+            0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0
+        )
         wv.dispatchTouchEvent(down)
         down.recycle()
 
         handler.postDelayed({
             val moveTime = SystemClock.uptimeMillis()
-            val move = MotionEvent.obtain(downTime, moveTime, MotionEvent.ACTION_MOVE, x + 1f, y + 1f, 0)
-            move.source = InputDevice.SOURCE_TOUCHSCREEN
-            move.setPressure(0.6f)
+            val move = MotionEvent.obtain(
+                downTime, moveTime, MotionEvent.ACTION_MOVE, x + 1f, y + 1f, 
+                0.6f, 0.1f, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0
+            )
             wv.dispatchTouchEvent(move)
             move.recycle()
         }, 30)
 
         handler.postDelayed({
             val upTime = SystemClock.uptimeMillis()
-            val up = MotionEvent.obtain(downTime, upTime, MotionEvent.ACTION_UP, x, y, 0)
-            up.source = InputDevice.SOURCE_TOUCHSCREEN
-            up.setPressure(0.0f)
+            val up = MotionEvent.obtain(
+                downTime, upTime, MotionEvent.ACTION_UP, x, y, 
+                0.0f, 0.1f, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0
+            )
             wv.dispatchTouchEvent(up)
             up.recycle()
         }, 100)
