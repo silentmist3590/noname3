@@ -12,9 +12,23 @@ class MoviesHDHub : MainAPI() {
     override var mainUrl = "https://movieshdhub.com"
     override var name = "MoviesHDHub"
     override var lang = "en"
+    override val hasMainPage = true
     override var hasQuickSearch = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
     override val usesWebView = false
+
+    override val mainPage = mainPageOf(
+        "$mainUrl/" to "Featured & Latest",
+        "$mainUrl/movies/" to "All Movies",
+        "$mainUrl/genre/action/" to "Action",
+        "$mainUrl/genre/adventure/" to "Adventure",
+        "$mainUrl/genre/animation/" to "Animation",
+        "$mainUrl/genre/comedy/" to "Comedy",
+        "$mainUrl/genre/drama/" to "Drama",
+        "$mainUrl/genre/horror/" to "Horror",
+        "$mainUrl/genre/science-fiction/" to "Sci-Fi",
+        "$mainUrl/genre/thriller/" to "Thriller"
+    )
 
     private val tmdbApi = "https://tmdb-proxy.silentmist3590.workers.dev/3"
     private val tmdbKey = "c3d997893bf55c01f39f821b53781547"
@@ -40,8 +54,12 @@ class MoviesHDHub : MainAPI() {
     // =====================================================================
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         ClipboardLogger.reset()
-        val base = request.data.ifBlank { mainUrl }
-        val url = if (page <= 1) base else "$mainUrl/page/$page/"
+        val base = request.data.ifBlank { mainUrl }.trimEnd('/')
+        val url = when {
+            page <= 1 -> "$base/"
+            base == mainUrl -> "$mainUrl/movies/page/$page/"
+            else -> "$base/page/$page/"
+        }
         ClipboardLogger.logAndCopy("HOME", "page=$page url=$url")
 
         val doc = app.get(url, headers = headers(url)).document
@@ -50,8 +68,10 @@ class MoviesHDHub : MainAPI() {
                 doc.select(".search-page .result-item article, .result-item")
                     .mapNotNull { it.toSearchResult() }
             }
-        ClipboardLogger.logAndCopy("HOME", "parsed ${items.size}")
-        return newHomePageResponse(request.name, items, false)
+        val hasNext = doc.selectFirst("a.arrow_pag, .pagination a.next, link[rel=next]") != null ||
+            items.size >= 20
+        ClipboardLogger.logAndCopy("HOME", "parsed ${items.size} | hasNext=$hasNext")
+        return newHomePageResponse(HomePageList(request.name, items), hasNext = hasNext)
     }
 
     // =====================================================================
