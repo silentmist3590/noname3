@@ -22,7 +22,7 @@ class MoviesHDHub : MainAPI() {
     private val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
-    /** Golden Rule #7 — headers cho request HTML/API. */
+    /** Golden Rule #7 */
     private fun headers(referer: String = "$mainUrl/") = mapOf(
         "User-Agent" to UA,
         "Referer" to referer,
@@ -31,12 +31,7 @@ class MoviesHDHub : MainAPI() {
         "Accept-Language" to "en-US,en;q=0.9"
     )
 
-    /**
-     * Map headers để truyền cho `M3u8Helper` và `ExtractorLink`.
-     * Trong version CloudStream của bạn, param `referer` có type
-     * `Map<String, String>?` (không phải String) — nên ta gộp luôn
-     * Referer vào Map này.
-     */
+    /** Map headers cho M3u8Helper / ExtractorLink — KHÔNG bao gồm referer (String). */
     private fun streamHeaders(referer: String): Map<String, String> =
         headers(referer) + mapOf("Referer" to referer)
 
@@ -60,7 +55,7 @@ class MoviesHDHub : MainAPI() {
     }
 
     // =====================================================================
-    // SEARCH — JSON API (HTML search page của site bị broken)
+    // SEARCH
     // =====================================================================
     override suspend fun search(query: String): List<SearchResponse> {
         ClipboardLogger.logAndCopy("SEARCH", "query=$query")
@@ -247,7 +242,7 @@ class MoviesHDHub : MainAPI() {
     }
 
     // =====================================================================
-    // LOAD LINKS — POST admin-ajax → WebView sniff → emit
+    // LOAD LINKS
     // =====================================================================
     override suspend fun loadLinks(
         data: String,
@@ -292,8 +287,9 @@ class MoviesHDHub : MainAPI() {
                 )
                 ClipboardLogger.logAndCopy("SERVER-$nume", "sniffed=${sniffed.size}")
 
-                // ============== EMIT — referer LUÔN là Map ==============
+                // ============ EMIT — referer là String, headers là Map ============
                 for (s in sniffed) {
+                    val ref: String = s.referer
                     val hdrs: Map<String, String> = streamHeaders(s.referer)
 
                     if (s.url.contains(".m3u8", true)) {
@@ -301,7 +297,8 @@ class MoviesHDHub : MainAPI() {
                             M3u8Helper.generateM3u8(
                                 source = "$name [$label]",
                                 streamUrl = s.url,
-                                referer = hdrs
+                                referer = ref,     // String ✓
+                                headers = hdrs     // Map ✓
                             ).forEach {
                                 callback(it)
                                 emitted = true
@@ -311,16 +308,15 @@ class MoviesHDHub : MainAPI() {
                         }
                     } else if (s.url.contains(".mp4", true)) {
                         try {
-                            callback(
-                                newExtractorLink(
-                                    source = "$name [$label]",
-                                    name = "$name [$label] • MP4",
-                                    url = s.url,
-                                    type = ExtractorLinkType.VIDEO
-                                ) {
-                                    this.referer = hdrs
-                                }
-                            )
+                            callback(newExtractorLink(
+                                source = "$name [$label]",
+                                name = "$name [$label] • MP4",
+                                url = s.url,
+                                type = ExtractorLinkType.VIDEO
+                            ) {
+                                this.referer = ref     // String ✓
+                                this.headers = hdrs    // Map ✓
+                            })
                             emitted = true
                         } catch (t: Throwable) {
                             ClipboardLogger.logAndCopy("MP4", "fail: ${t.message}")
@@ -337,12 +333,20 @@ class MoviesHDHub : MainAPI() {
         return emitted
     }
 
+    /**
+     * POST admin-ajax.php — `data` là **Map** (form-encoded) trong version này.
+     * Body sau khi encode = `action=doo_player_ajax&post=X&nume=Y` — y hệt cURL.
+     */
     private suspend fun fetchEmbedUrl(
         postId: String,
         nume: String,
         referer: String
     ): String? {
-        val body = "action=doo_player_ajax&post=$postId&nume=$nume"
+        val formFields: Map<String, String> = mapOf(
+            "action" to "doo_player_ajax",
+            "post" to postId,
+            "nume" to nume
+        )
         val raw = try {
             app.post(
                 "$mainUrl/wp-admin/admin-ajax.php",
@@ -351,7 +355,7 @@ class MoviesHDHub : MainAPI() {
                     "X-Requested-With" to "XMLHttpRequest",
                     "Accept" to "application/json, text/javascript, */*; q=0.01"
                 ),
-                data = body
+                data = formFields   // Map ✓
             ).text
         } catch (t: Throwable) {
             ClipboardLogger.logAndCopy("AJAX-$nume", "fail: ${t.message}")
