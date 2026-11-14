@@ -6,7 +6,7 @@ cloudstream {
     language = "en"
     description = "Movieshdhub.com"
     authors = listOf("TJ-Plugins")
-    version = 1
+    version = 2
     status = 1
     tvTypes = listOf("Movie", "TvSeries")
 }
