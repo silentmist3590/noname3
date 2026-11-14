@@ -2,7 +2,6 @@ package com.movieshdhub
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.network.WebViewResolver // <-- IMPORT QUAN TRỌNG
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.json.JSONObject
@@ -31,7 +30,8 @@ class MoviesHDHub : MainAPI() {
         "$mainUrl/genre/thriller/" to "Thriller"
     )
 
-    private val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    private val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
     private fun headers(referer: String = "$mainUrl/") = mapOf(
         "User-Agent" to UA,
@@ -41,14 +41,22 @@ class MoviesHDHub : MainAPI() {
         "Accept-Language" to "en-US,en;q=0.9"
     )
 
-    private fun streamHeaders(referer: String): Map<String, String> = mapOf(
-        "User-Agent" to UA,
-        "Referer" to referer,
-        "Origin" to referer.trimEnd('/'),
-        "Accept" to "*/*",
-        "Accept-Language" to "en-US,en;q=0.9",
-        "Connection" to "keep-alive"
-    )
+    private fun streamHeaders(referer: String, cookies: String = ""): Map<String, String> {
+        val m = mutableMapOf(
+            "User-Agent" to UA,
+            "Referer" to referer,
+            "Origin" to referer.trimEnd('/'),
+            "Accept" to "*/*",
+            "Accept-Language" to "en-US,en;q=0.9",
+            "Accept-Encoding" to "identity",
+            "Connection" to "keep-alive",
+            "Sec-Fetch-Dest" to "empty",
+            "Sec-Fetch-Mode" to "cors",
+            "Sec-Fetch-Site" to "same-site"
+        )
+        if (cookies.isNotBlank()) m["Cookie"] = cookies
+        return m
+    }
 
     // =====================================================================
     // HOME
@@ -152,7 +160,9 @@ class MoviesHDHub : MainAPI() {
                 || doc.selectFirst("#seasons, .single-tvshows") != null
                 || doc.selectFirst(".tvshows .se-c") != null
 
-        ClipboardLogger.logAndCopy("LOAD", "title=$title | year=$year | dur=$duration | series=$isSeries")
+        ClipboardLogger.logAndCopy(
+            "LOAD", "title=$title | year=$year | dur=$duration | series=$isSeries"
+        )
 
         return if (isSeries) {
             val eps = parseEpisodes(doc, url)
@@ -207,7 +217,7 @@ class MoviesHDHub : MainAPI() {
     }
 
     // =====================================================================
-    // LOAD LINKS (SỬ DỤNG WEBVIEWRESOLVER)
+    // LOAD LINKS
     // =====================================================================
     override suspend fun loadLinks(
         data: String,
@@ -220,10 +230,14 @@ class MoviesHDHub : MainAPI() {
 
         val postId = doc.selectFirst("meta#dooplay-ajax-counter")?.attr("data-postid").orEmpty()
             .ifBlank { doc.selectFirst("[data-postid]")?.attr("data-postid").orEmpty() }
-            .ifBlank { Regex("/movies?/([^/]+)/?$").find(data)?.groupValues?.get(1).orEmpty() }
+            .ifBlank {
+                Regex("/movies?/([^/]+)/?$").find(data)?.groupValues?.get(1).orEmpty()
+            }
 
         val servers = doc.select("li.dooplay_player_option")
-            .filter { it.attr("data-nume").isNotEmpty() && it.attr("data-nume") != "trailer" }
+            .filter {
+                it.attr("data-nume").isNotEmpty() && it.attr("data-nume") != "trailer"
+            }
 
         ClipboardLogger.logAndCopy("LINKS", "postId=$postId | servers=${servers.size}")
         if (servers.isEmpty()) return false
@@ -241,96 +255,98 @@ class MoviesHDHub : MainAPI() {
                 }
                 ClipboardLogger.logAndCopy("SERVER-$nume", "embed=$embed")
 
-                // SỬ DỤNG WebViewResolver ĐỂ XỬ LÝ CLOUDFLARE VÀ LẤY LINK M3U8
-                val resolver = WebViewResolver(
-                    interceptUrl = Regex(""".*\.m3u8.*"""), // Regex bắt link m3u8
-                    additionalUrls = listOf(Regex(""".*\.mp4.*""")), // Bắt thêm mp4 nếu có
-                    userAgent = UA
-                )
-
-                val sniffed = resolver.resolveUsingWebView(
+                val sniffed = WebViewSniffer.sniff(
                     url = embed,
                     referer = data,
-                    headers = headers(embed)
+                    headers = headers(embed),
+                    timeoutMs = 60_000L
+                )
+                ClipboardLogger.logAndCopy("SERVER-$nume", "sniffed=${sniffed.size}")
+
+                val target: SniffResult? =
+                    sniffed.firstOrNull { it.url.contains("/master.m3u8") }
+                        ?: sniffed.firstOrNull { it.url.contains(".m3u8", true) }
+                        ?: sniffed.firstOrNull { it.url.contains(".mp4", true) }
+
+                if (target == null) {
+                    ClipboardLogger.logAndCopy("SERVER-$nume", "no m3u8/mp4")
+                    continue
+                }
+
+                val domainRef: String = when {
+                    target.url.contains("juniperandjade.space") ->
+                        "https://juniperandjade.space/"
+                    target.url.contains("onlineempireblueprint.site") ->
+                        "https://onlineempireblueprint.site/"
+                    target.url.contains("vaplayer") ->
+                        "https://streamdata.vaplayer.ru/"
+                    target.url.contains("vidsrc") ->
+                        "https://data.vidsrc.sh/"
+                    else -> target.referer
+                }
+                val hdrs = streamHeaders(domainRef, target.cookies)
+
+                ClipboardLogger.logAndCopy(
+                    "TARGET",
+                    "url=${target.url.take(180)} | cookie.len=${target.cookies.length}"
                 )
 
-                ClipboardLogger.logAndCopy("SERVER-$nume", "resolved=${sniffed.size}")
-
-                if (sniffed.isEmpty()) {
-                    ClipboardLogger.logAndCopy("SERVER-$nume", "WebViewResolver returned empty")
-                    continue
-                }
-
-                // Lấy link m3u8 đầu tiên (ưu tiên master.m3u8)
-                val targetUrl = sniffed.firstOrNull { it.contains("master.m3u8") }
-                    ?: sniffed.firstOrNull { it.contains(".m3u8") }
-                    ?: sniffed.firstOrNull { it.contains(".mp4") }
-
-                if (targetUrl == null) {
-                    ClipboardLogger.logAndCopy("SERVER-$nume", "no playable link in resolved")
-                    continue
-                }
-
-                val domainRef = when {
-                    targetUrl.contains("juniperandjade.space") -> "https://juniperandjade.space/"
-                    targetUrl.contains("vaplayer") -> "https://streamdata.vaplayer.ru/"
-                    targetUrl.contains("vidsrc") -> "https://data.vidsrc.sh/"
-                    else -> data
-                }
-
-                val hdrs = streamHeaders(domainRef)
-
-                ClipboardLogger.logAndCopy("TARGET", "url=${targetUrl.take(200)}")
-
-                // EMIT LINK
-                if (targetUrl.contains(".m3u8")) {
+                // Test URL trước khi emit (chỉ test nếu có cookie)
+                var verified = false
+                if (target.cookies.isNotBlank()) {
                     try {
-                        // Thử dùng M3U8Helper để bóc tách chất lượng
-                        val generated = M3u8Helper.generateM3u8(
-                            source = "$name [$label]",
-                            streamUrl = targetUrl,
-                            referer = domainRef,
-                            headers = hdrs
+                        val test = app.get(target.url, headers = hdrs)
+                        ClipboardLogger.logAndCopy(
+                            "TEST", "code=${test.code} len=${test.text.length}"
                         )
-                        if (generated.isNotEmpty()) {
-                            generated.forEach {
-                                callback(it)
-                                emitted = true
-                            }
-                            ClipboardLogger.logAndCopy("M3U8-RES", "found ${generated.size} links")
-                        } else {
-                            // Fallback phát trực tiếp
-                            callback(newExtractorLink(
-                                source = "$name [$label]",
-                                name = "$name [$label] • HLS",
-                                url = targetUrl,
-                                type = ExtractorLinkType.M3U8
-                            ) {
-                                this.referer = domainRef
-                                this.headers = hdrs
-                            })
-                            emitted = true
-                            ClipboardLogger.logAndCopy("EMIT-RAW", "OK (fallback)")
-                        }
-                    } catch (t: Throwable) {
-                        ClipboardLogger.logAndCopy("M3U8-FAIL", "${t.message}")
-                        // Fallback phát trực tiếp nếu M3U8Helper lỗi
+                        if (test.code in 200..299) verified = true
+                        else ClipboardLogger.logAndCopy("TEST", "REJECTED code=${test.code}")
+                    } catch (e: Exception) {
+                        ClipboardLogger.logAndCopy("TEST", "fail: ${e.message}")
+                    }
+                } else {
+                    ClipboardLogger.logAndCopy("TEST", "no cookie — trust WebView, emit anyway")
+                    verified = true
+                }
+
+                if (!verified) continue
+
+                if (target.url.contains(".m3u8")) {
+                    // 1. Emit raw M3U8 trước (ExoPlayer phát được ngay)
+                    try {
                         callback(newExtractorLink(
                             source = "$name [$label]",
                             name = "$name [$label] • HLS",
-                            url = targetUrl,
+                            url = target.url,
                             type = ExtractorLinkType.M3U8
                         ) {
                             this.referer = domainRef
                             this.headers = hdrs
                         })
                         emitted = true
+                        ClipboardLogger.logAndCopy("EMIT-RAW", "OK")
+                    } catch (t: Throwable) {
+                        ClipboardLogger.logAndCopy("EMIT-RAW", "fail: ${t.message}")
                     }
-                } else if (targetUrl.contains(".mp4")) {
+
+                    // 2. Bổ sung M3U8Helper để có đa chất lượng
+                    try {
+                        val gen = M3u8Helper.generateM3u8(
+                            source = "$name [$label]",
+                            streamUrl = target.url,
+                            referer = domainRef,
+                            headers = hdrs
+                        )
+                        ClipboardLogger.logAndCopy("M3U8-RES", "found ${gen.size}")
+                        gen.forEach { callback(it); emitted = true }
+                    } catch (t: Throwable) {
+                        ClipboardLogger.logAndCopy("M3U8-FAIL", "${t.message}")
+                    }
+                } else if (target.url.contains(".mp4")) {
                     callback(newExtractorLink(
                         source = "$name [$label]",
                         name = "$name [$label] • MP4",
-                        url = targetUrl,
+                        url = target.url,
                         type = ExtractorLinkType.VIDEO
                     ) {
                         this.referer = domainRef
@@ -352,7 +368,12 @@ class MoviesHDHub : MainAPI() {
     // =====================================================================
     // FETCH EMBED URL
     // =====================================================================
-    private suspend fun fetchEmbedUrl(postId: String, nume: String, type: String, referer: String): String? {
+    private suspend fun fetchEmbedUrl(
+        postId: String,
+        nume: String,
+        type: String,
+        referer: String
+    ): String? {
         try {
             val formData = mapOf(
                 "action" to "doo_player_ajax",
@@ -361,7 +382,8 @@ class MoviesHDHub : MainAPI() {
                 "type" to type
             )
             val reqHeaders = headers(referer).toMutableMap()
-            reqHeaders["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
+            reqHeaders["Content-Type"] =
+                "application/x-www-form-urlencoded; charset=UTF-8"
             reqHeaders["X-Requested-With"] = "XMLHttpRequest"
 
             val resp = app.post(
