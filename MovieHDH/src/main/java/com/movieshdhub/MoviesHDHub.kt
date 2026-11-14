@@ -220,16 +220,12 @@ class MoviesHDHub : MainAPI() {
                 Regex("/movies?/([^/]+)/?$").find(data)?.groupValues?.get(1).orEmpty()
             }
 
-        val nonce = doc.selectFirst("script:containsData(live_search-js-extra)")?.data()
-            ?.let { Regex(""""nonce":"([^"]+)"""").find(it)?.groupValues?.get(1) }
-            ?: ""
-
         val servers = doc.select("li.dooplay_player_option")
             .filter {
                 it.attr("data-nume").isNotEmpty() && it.attr("data-nume") != "trailer"
             }
 
-        ClipboardLogger.logAndCopy("LINKS", "postId=$postId | nonce=$nonce | servers=${servers.size}")
+        ClipboardLogger.logAndCopy("LINKS", "postId=$postId | servers=${servers.size}")
         if (servers.isEmpty()) return false
 
         var emitted = false
@@ -238,7 +234,6 @@ class MoviesHDHub : MainAPI() {
             val type = li.attr("data-type").ifBlank { "movie" }
             val label = li.selectFirst("span.title")?.text()?.trim() ?: "Server $nume"
             try {
-                // Chỉ dùng admin-ajax.php vì log cho thấy API V2 bị lỗi 403
                 val embed = fetchEmbedUrl(postId, nume, type, data)
                 if (embed.isNullOrBlank()) {
                     ClipboardLogger.logAndCopy("SERVER-$nume", "no embed url")
@@ -254,34 +249,32 @@ class MoviesHDHub : MainAPI() {
                 )
                 ClipboardLogger.logAndCopy("SERVER-$nume", "sniffed=${sniffed.size}")
 
-                // Phát link (Đã sửa để chấp nhận mọi URL)
+                // CHỈ XỬ LÝ M3U8 VÀ MP4 (Bỏ qua link rác)
                 for (s in sniffed) {
+                    if (!s.url.contains(".m3u8", true) && !s.url.contains(".mp4", true)) {
+                        continue
+                    }
+                    
                     val ref: String = s.referer
                     val hdrs: Map<String, String> = streamHeaders(s.referer)
                     
                     ClipboardLogger.logAndCopy("EMIT", "url=${s.url}")
 
-                    // 1. Thử ép qua M3u8Helper cho mọi link (kể cả gateway)
-                    try {
-                        val generatedLinks = M3u8Helper.generateM3u8(
-                            source = "$name [$label]",
-                            streamUrl = s.url,
-                            referer = ref,
-                            headers = hdrs
-                        )
-                        if (generatedLinks.isNotEmpty()) {
-                            generatedLinks.forEach {
+                    if (s.url.contains(".m3u8", true)) {
+                        try {
+                            M3u8Helper.generateM3u8(
+                                source = "$name [$label]",
+                                streamUrl = s.url,
+                                referer = ref,
+                                headers = hdrs
+                            ).forEach {
                                 callback(it)
                                 emitted = true
                             }
-                            continue // Nếu thành công thì bỏ qua kiểm tra MP4 bên dưới
+                        } catch (t: Throwable) {
+                            ClipboardLogger.logAndCopy("M3U8-FAIL", "${t.message}")
                         }
-                    } catch (t: Throwable) {
-                        ClipboardLogger.logAndCopy("M3U8-FAIL", "${t.message}")
-                    }
-
-                    // 2. Fallback nếu là link MP4 trực tiếp
-                    if (s.url.contains(".mp4", true)) {
+                    } else if (s.url.contains(".mp4", true)) {
                         try {
                             callback(newExtractorLink(
                                 source = "$name [$label]",
@@ -309,7 +302,7 @@ class MoviesHDHub : MainAPI() {
     }
 
     // =====================================================================
-    // FETCH EMBED URL (Dùng admin-ajax.php vì ổn định hơn)
+    // FETCH EMBED URL
     // =====================================================================
     private suspend fun fetchEmbedUrl(postId: String, nume: String, type: String, referer: String): String? {
         try {
