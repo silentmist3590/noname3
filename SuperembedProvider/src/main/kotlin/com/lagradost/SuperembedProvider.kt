@@ -11,6 +11,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.ActivityInfo
 import android.graphics.Color
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -54,7 +55,6 @@ private fun parseRef(s: String): Ref? {
 }
 
 private data class SniffResult(val url: String, val headers: Map<String, String>)
-private data class ServerInfo(val id: String, val name: String)
 
 private val AD_DOMAINS = listOf(
     "doubleclick.net", "googlesyndication.com", "googleadservices.com",
@@ -67,8 +67,11 @@ private val AD_DOMAINS = listOf(
     "bkkunbeurvocc.website", "enveulpwblred.space", "my.rtmark.net",
     "bdcdmyzacrjkh.space", "acscdn.com", "aclib.net", "createlouisville.org",
     "workdeadlinededicate.com", "protrafficinspector.com", "push-sdk.com", "portalfluently.com",
-    "5gvci.com", "sw.js", "dd.js"
+    "5gvci.com", "sw.js", "dd.js", "jwpltx.com", "ping.gif"
 )
+
+// Chỉ chặn vipstream-A vì nó bị lỗi 2004
+private val BROKEN_SERVERS = listOf("vipstream-A")
 
 // =====================================================================================
 // 2. API SERVICES
@@ -216,17 +219,17 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // WEBVIEW SNIFFER (TỰ ĐỘNG BỎ QUA VIPSTREAM-A)
+    // WEBVIEW SNIFFER (BẮT TRỌN BỘ HEADER CHO VOE)
     // =====================================================================================
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun sniffStream(
         pageUrl: String, referer: String, seen: MutableList<String>
-    ): Pair<SniffResult?, List<ServerInfo>> {
+    ): SniffResult? {
         return suspendCoroutine { cont ->
             val handler = Handler(Looper.getMainLooper())
             handler.post {
                 val ctx: Context? = CommonActivity.activity
-                if (ctx == null) { cont.resume(Pair(null, emptyList())); return@post }
+                if (ctx == null) { cont.resume(null); return@post }
 
                 try {
                     val container = FrameLayout(ctx)
@@ -239,8 +242,6 @@ class SuperembedProvider : MainAPI() {
                     var autoClickEnabled = true
                     val originalOrientation = ctx.resources.configuration.orientation
                     var firstStream: SniffResult? = null
-                    var serverList: List<ServerInfo> = emptyList()
-                    var hasExtractedServers = false
 
                     var cx = 500f
                     var cy = 500f
@@ -265,49 +266,29 @@ class SuperembedProvider : MainAPI() {
                                 CommonActivity.activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
                             }
                         } catch (_: Exception) {}
-                        cont.resume(Pair(firstStream, serverList))
+                        cont.resume(firstStream)
                     }
 
                     fun processFoundUrl(url: String, requestHeaders: Map<String, String>) {
                         if (firstStream != null || finished) return
                         
+                        // ⭐ CHÌA KHÓA VƯỢT LỖI 3003 CỦA VOE:
+                        // Lấy chính xác 100% Cookie và User-Agent từ trình duyệt
+                        val cookie = CookieManager.getInstance().getCookie(url) ?: CookieManager.getInstance().getCookie("https://voe.sx/") ?: ""
+                        
                         val finalHeaders = requestHeaders.toMutableMap().apply {
-                            if (!containsKey("Referer")) put("Referer", "https://streamingnow.mov/")
-                            if (!containsKey("Origin")) put("Origin", "https://streamingnow.mov")
+                            if (cookie.isNotEmpty()) put("Cookie", cookie)
+                            if (!containsKey("Referer")) put("Referer", "https://voe.sx/")
+                            if (!containsKey("Origin")) put("Origin", "https://voe.sx")
                         }
                         
                         firstStream = SniffResult(url, finalHeaders)
-                        ClipboardLogger.logAndCopy("Sniff HIT", "Bắt link (kèm Header gốc): $url")
+                        ClipboardLogger.logAndCopy("Sniff HIT", "Bắt link VOE (kèm full Header): $url")
                         
-                        handler.post {
-                            if (finished) return@post
-                            
-                            if (!hasExtractedServers) {
-                                hasExtractedServers = true
-                                try {
-                                    wv.evaluateJavascript(
-                                        "(function(){" +
-                                        "var arr=[];" +
-                                        "document.querySelectorAll('ul.sources-list li[data-server]').forEach(function(l){" +
-                                        "  var n=l.querySelector('.server-name');" +
-                                        "  arr.push({id:l.getAttribute('data-server'), name: n ? n.textContent.trim() : l.textContent.trim()});" +
-                                        "});" +
-                                        "return JSON.stringify(arr);" +
-                                        "})()"
-                                    ) { raw ->
-                                        serverList = parseServerList(raw)
-                                        ClipboardLogger.logAndCopy("ServerList", "Lấy được ${serverList.size} server phụ.")
-                                    }
-                                } catch (_: Exception) {}
-                            }
-                            
-                            handler.postDelayed({
-                                if (!finished) finish()
-                            }, 200L)
-                        }
+                        handler.postDelayed({
+                            if (!finished) finish()
+                        }, 200L)
                     }
-
-                    val streamRegex = Regex("""\.m3u8|\.mpd|master\.txt|\.mp4""", RegexOption.IGNORE_CASE)
 
                     wv.settings.apply {
                         javaScriptEnabled = true
@@ -330,7 +311,7 @@ class SuperembedProvider : MainAPI() {
                     wv.requestFocus()
                     wv.setOnKeyListener { _, keyCode, event ->
                         if (event.action == KeyEvent.ACTION_DOWN) {
-                            autoClickEnabled = false // Người dùng can thiệp -> tắt tự động click
+                            autoClickEnabled = false
                             
                             when (keyCode) {
                                 KeyEvent.KEYCODE_DPAD_UP -> { cy -= 40f; cursor.y = cy; true }
@@ -369,15 +350,12 @@ class SuperembedProvider : MainAPI() {
                             val msg = consoleMessage?.message() ?: return super.onConsoleMessage(consoleMessage)
                             if (msg == "CAPTCHA_ON") {
                                 isCaptchaActive = true
-                                ClipboardLogger.logAndCopy("Captcha", "Đang chờ bạn giải Captcha...")
                             } else if (msg == "CAPTCHA_OFF") {
                                 isCaptchaActive = false
-                                ClipboardLogger.logAndCopy("Captcha", "Đã giải xong.")
                             } else if (msg.startsWith("HOOK_VIDEO_URL:")) {
                                 val url = msg.removePrefix("HOOK_VIDEO_URL:").trim()
                                 if (url.startsWith("http") && !AD_DOMAINS.any { url.contains(it, true) }) {
-                                    ClipboardLogger.logAndCopy("JS Hook", "Bắt link từ video.src: $url")
-                                    val cookie = CookieManager.getInstance().getCookie("https://streamingnow.mov/") ?: ""
+                                    val cookie = CookieManager.getInstance().getCookie("https://voe.sx/") ?: ""
                                     processFoundUrl(url, mapOf("Cookie" to cookie))
                                 }
                             }
@@ -387,40 +365,10 @@ class SuperembedProvider : MainAPI() {
 
                     wv.webViewClient = object : WebViewClient() {
                         override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                            view?.evaluateJavascript("try{localStorage.clear();sessionStorage.clear();}catch(e){}", null)
+                            
                             val js = """
                                 (function() {
-                                    if (window.fetch) {
-                                        var origFetch = window.fetch;
-                                        window.fetch = function() {
-                                            var args = arguments;
-                                            return origFetch.apply(this, args).then(function(resp) {
-                                                var url = typeof args[0] === 'string' ? args[0] : args[0].url;
-                                                if (url && (url.includes('.m3u8') || url.includes('.mp4'))) {
-                                                    console.log("HOOK_VIDEO_URL:" + new URL(url, window.location.href).href);
-                                                } else {
-                                                    resp.clone().text().then(function(txt) {
-                                                        if (txt && txt.startsWith('#EXTM3U')) {
-                                                            console.log("HOOK_VIDEO_URL:" + new URL(url, window.location.href).href);
-                                                        }
-                                                    }).catch(function(){});
-                                                }
-                                                return resp;
-                                            });
-                                        };
-                                    }
-
-                                    var origOpen = XMLHttpRequest.prototype.open;
-                                    XMLHttpRequest.prototype.open = function(method, url) {
-                                        this.addEventListener('load', function() {
-                                            if (url && (url.includes('.m3u8') || url.includes('.mp4'))) {
-                                                console.log("HOOK_VIDEO_URL:" + new URL(url, window.location.href).href);
-                                            } else if (this.responseText && this.responseText.startsWith('#EXTM3U')) {
-                                                console.log("HOOK_VIDEO_URL:" + new URL(url, window.location.href).href);
-                                            }
-                                        });
-                                        origOpen.apply(this, arguments);
-                                    };
-
                                     var checkVideo = setInterval(function() {
                                         var v = document.querySelector('video');
                                         if (v && v.duration > 0) {
@@ -431,18 +379,6 @@ class SuperembedProvider : MainAPI() {
                                                 console.log("HOOK_VIDEO_URL:" + v.currentSrc);
                                                 clearInterval(checkVideo);
                                             }
-                                        }
-                                    }, 1000);
-
-                                    setInterval(function() {
-                                        var isCaptcha = document.body.innerText.includes('Select all images') || 
-                                                        document.body.innerText.includes('Verification') ||
-                                                        document.querySelector('.cf-turnstile') !== null ||
-                                                        document.querySelector('.captcha-holder') !== null;
-                                        if (isCaptcha) {
-                                            if (!window.__isCap) { window.__isCap = true; console.log("CAPTCHA_ON"); }
-                                        } else {
-                                            if (window.__isCap) { window.__isCap = false; console.log("CAPTCHA_OFF"); }
                                         }
                                     }, 1000);
                                 })();
@@ -457,14 +393,18 @@ class SuperembedProvider : MainAPI() {
                                 return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream("".toByteArray()))
                             }
 
-                            if (!u.contains(".png") && !u.contains(".jpg") && !u.contains(".css") && !u.contains(".js") && seen.size < 100) {
-                                seen.add(u.take(150))
-                            }
+                            if (seen.size < 100) seen.add(u.take(150))
 
-                            if (streamRegex.containsMatchIn(u) && !u.contains("/embed/iframe_player/")) {
+                            val uri = Uri.parse(u)
+                            val path = uri.path ?: ""
+                            val isRealStream = path.endsWith(".m3u8", true) || 
+                                               path.endsWith(".mp4", true) || 
+                                               path.endsWith(".mpd", true) || 
+                                               path.endsWith(".ts", true)
+
+                            if (isRealStream && !u.contains("/embed/iframe_player/")) {
                                 val headers = request?.requestHeaders ?: emptyMap()
                                 
-                                // ⭐ KIỂM TRA SERVER ĐANG CHỌN. NẾU LÀ VIPSTREAM-A THÌ BỎ QUA
                                 handler.post {
                                     wv.evaluateJavascript(
                                         "(function(){" +
@@ -477,8 +417,8 @@ class SuperembedProvider : MainAPI() {
                                         "return '';" +
                                         "})()"
                                     ) { activeServer ->
-                                        if (activeServer != null && activeServer.contains("vipstream-A")) {
-                                            ClipboardLogger.logAndCopy("Skip Link", "Phát hiện link vipstream-A, BỎ QUA do lỗi 2004.")
+                                        if (activeServer != null && BROKEN_SERVERS.any { activeServer.contains(it, true) }) {
+                                            ClipboardLogger.logAndCopy("Skip Link", "Bỏ qua link lỗi: $activeServer")
                                         } else {
                                             processFoundUrl(u, headers)
                                         }
@@ -522,16 +462,15 @@ class SuperembedProvider : MainAPI() {
                             
                             if (autoClickEnabled && !isCaptchaActive) {
                                 try {
-                                    // ⭐ TỰ ĐỘNG CLICK VÀO SERVER AN TOÀN (KHÔNG CLICK VIPSTREAM-A)
                                     wv.evaluateJavascript(
                                         "(function(){" +
                                         "function fire(el){if(!el)return;try{el.click();}catch(e){}}" +
                                         "var items = document.querySelectorAll('ul.sources-list li');" +
                                         "var clicked = false;" +
-                                        "// Ưu tiên click Y, GDrive, streamwish" +
                                         "for (var i = 0; i < items.length; i++) {" +
                                         "  var txt = items[i].innerText;" +
-                                        "  if (txt.includes('vipstream-Y') || txt.includes('GDrive') || txt.includes('streamwish')) {" +
+                                        "  // Ưu tiên click vào VOE, GDrive, Streamwish" +
+                                        "  if (txt.includes('voe') || txt.includes('GDrive') || txt.includes('streamwish')) {" +
                                         "    fire(items[i]); clicked = true; break;" +
                                         "  }" +
                                         "}" +
@@ -549,7 +488,7 @@ class SuperembedProvider : MainAPI() {
                                     )
                                 } catch (_: Exception) {}
                             }
-                            handler.postDelayed(this, 2500)
+                            handler.postDelayed(this, 2000)
                         }
                     }
                     handler.postDelayed(clickRunnable, 2000)
@@ -558,7 +497,7 @@ class SuperembedProvider : MainAPI() {
                     
                     wv.loadUrl(pageUrl)
                 } catch (e: Exception) {
-                    cont.resume(Pair(null, emptyList()))
+                    cont.resume(null)
                 }
             }
         }
@@ -581,78 +520,6 @@ class SuperembedProvider : MainAPI() {
                 up.recycle()
             }, 60)
         } catch (_: Exception) {}
-    }
-
-    private fun parseServerList(raw: String?): List<ServerInfo> {
-        if (raw == null) return emptyList()
-        return try {
-            var cleaned = raw.trim()
-            if (cleaned.startsWith("\"") && cleaned.endsWith("\"")) cleaned = cleaned.substring(1, cleaned.length - 1)
-            cleaned = cleaned.replace("\\\"", "\"")
-            if (cleaned == "[]" || cleaned.isEmpty()) return emptyList()
-            val arr = org.json.JSONArray(cleaned)
-            val list = mutableListOf<ServerInfo>()
-            for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
-                list.add(ServerInfo(obj.optString("id"), obj.optString("name")))
-            }
-            list
-        } catch (_: Exception) { emptyList() }
-    }
-
-    // =====================================================================================
-    // LẤY LINK TỪ CÁC SERVER PHỤ
-    // =====================================================================================
-    private suspend fun extractSpecificServers(
-        servers: List<ServerInfo>,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ) {
-        val playerReferer = "https://streamingnow.mov/"
-        val cookie = CookieManager.getInstance().getCookie(playerReferer) ?: ""
-        
-        val targetNames = listOf("streamwish", "mixdrop")
-        val filteredServers = servers.filter { s -> targetNames.any { s.name.contains(it, true) } }
-        
-        if (filteredServers.isEmpty()) return
-        
-        ClipboardLogger.logAndCopy("ExtraServers", "Đang thử lấy thêm từ: ${filteredServers.joinToString { it.name }}")
-
-        for (server in filteredServers) {
-            val serverUrl = "https://streamingnow.mov/playvideo.php?server_id=${server.id}"
-            try {
-                val res = app.get(serverUrl, headers = mapOf(
-                    "Referer" to playerReferer,
-                    "Origin" to playerReferer,
-                    "Cookie" to cookie
-                )).text
-                
-                val m3u8Regex = Regex("""https?://[^"'\\\s]+\.m3u8[^"'\\\s]*""", RegexOption.IGNORE_CASE)
-                val m3u8 = m3u8Regex.find(res)?.value?.replace("\\/", "/")
-                
-                if (m3u8 != null) {
-                    callback(newExtractorLink(this.name, "MultiEmbed ${server.name}", m3u8, ExtractorLinkType.M3U8) {
-                        this.referer = playerReferer
-                        this.quality = Qualities.Unknown.value
-                        this.headers = mapOf(
-                            "Referer" to playerReferer, 
-                            "Origin" to playerReferer,
-                            "Cookie" to cookie
-                        )
-                    })
-                    ClipboardLogger.logAndCopy("ExtraServer Success", "${server.name}: $m3u8")
-                } else {
-                    val iframeRegex = Regex("""<iframe[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
-                    val iframeUrl = iframeRegex.find(res)?.groupValues?.get(1)
-                    if (iframeUrl != null) {
-                        loadExtractor(iframeUrl, playerReferer, subtitleCallback, callback)
-                        ClipboardLogger.logAndCopy("ExtraServer Extractor", "${server.name}: $iframeUrl")
-                    }
-                }
-            } catch (e: Exception) {
-                ClipboardLogger.logAndCopy("ExtraServer Error", "${server.name}: ${e.message}")
-            }
-        }
     }
 
     // =====================================================================================
@@ -687,14 +554,14 @@ class SuperembedProvider : MainAPI() {
             }
 
             val seen = mutableListOf<String>()
-            val (result, servers) = sniffStream(embedUrl, fakeReferer, seen)
+            val result = sniffStream(embedUrl, fakeReferer, seen)
 
             if (result == null) {
-                ClipboardLogger.logAndCopy("Error", "Không bắt được link chính. Có thể bạn đã chọn server khác để phát trên WebView.")
+                ClipboardLogger.logAndCopy("Error", "Không bắt được link chính.")
                 return false
             }
 
-            val playerReferer = "https://streamingnow.mov/"
+            val playerReferer = "https://voe.sx/"
             val finalHeaders = result.headers.toMutableMap()
 
             if (result.url.contains(".m3u8")) {
@@ -707,22 +574,18 @@ class SuperembedProvider : MainAPI() {
                 if (qualities.isNotEmpty()) {
                     qualities.forEach { callback.invoke(it) }
                 } else {
-                    callback(newExtractorLink(this.name, "MultiEmbed (Primary)", result.url, ExtractorLinkType.M3U8) {
+                    callback(newExtractorLink(this.name, "MultiEmbed (VOE)", result.url, ExtractorLinkType.M3U8) {
                         this.referer = playerReferer
                         this.quality = Qualities.P1080.value
                         this.headers = finalHeaders
                     })
                 }
             } else {
-                callback(newExtractorLink(this.name, "MultiEmbed (Primary)", result.url, ExtractorLinkType.VIDEO) {
+                callback(newExtractorLink(this.name, "MultiEmbed (VOE)", result.url, ExtractorLinkType.VIDEO) {
                     this.referer = playerReferer
                     this.quality = Qualities.Unknown.value
                     this.headers = finalHeaders
                 })
-            }
-
-            if (servers.isNotEmpty()) {
-                extractSpecificServers(servers, subtitleCallback, callback)
             }
 
             return true
