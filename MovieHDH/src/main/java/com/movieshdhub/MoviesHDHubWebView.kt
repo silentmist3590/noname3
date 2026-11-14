@@ -27,32 +27,20 @@ import kotlin.coroutines.suspendCoroutine
 
 data class SniffResult(val url: String, val referer: String)
 
-/**
- * WebView Sniffer — không phụ thuộc kotlinx.coroutines.
- *  - Golden Rule #1: chỉ dùng CommonActivity.activity
- *  - Golden Rule #4: D-pad cursor cho TV Box
- *  - Golden Rule #6: mọi thao tác UI qua Handler.post(main)
- *  - Golden Rule #7: cookie/headers do WebView tự xử lý
- *
- * Vì stream_urls trên vaplayer/vidsrc được mã hoá WASM — phải để browser
- * tự chạy WASM rồi sniff URL m3u8/mp4 từ network.
- */
 object WebViewSniffer {
 
     private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
-    /** Domain quảng cáo / tracker — bỏ qua hoàn toàn. */
     private val AD_DOMAINS = listOf(
         "doubleclick", "googlesyndication", "googleadservices",
         "google-analytics", "googletagmanager", "googletagservices",
         "amung.us", "histats", "waust.at", "adservice", "adskeeper",
         "disable-devtool", "acscdn", "rapidadexchange", "usrpubtrck",
         "suv5", "aclib", "cloudflareinsights", "beacon.min.js",
-        "cast_sender", "cdn-cgi/rum", "gstatic.com/cv"
+        "cast_sender", "cdn-cgi/rum", "gstatic.com/cv", "cuid"
     )
 
-    /** Default 60s — TV series cần lâu hơn movie. */
     suspend fun sniff(
         url: String,
         referer: String,
@@ -68,7 +56,6 @@ object WebViewSniffer {
             val lastPageUrl = arrayOf(url)
             val resumed = AtomicBoolean(false)
 
-            // resume cont đúng 1 lần duy nhất
             fun finish(value: List<SniffResult>) {
                 if (!resumed.compareAndSet(false, true)) return
                 cont.resume(value)
@@ -76,7 +63,6 @@ object WebViewSniffer {
 
             main.post {
                 try {
-                    // ---------- Overlay + spinner ----------
                     val overlay = FrameLayout(activity).apply {
                         setBackgroundColor(0xE6000000.toInt())
                         isFocusable = true
@@ -89,7 +75,6 @@ object WebViewSniffer {
                         }
                     }
 
-                    // ---------- WebView ----------
                     val webView = WebView(activity).apply {
                         settings.apply {
                             javaScriptEnabled = true
@@ -113,14 +98,9 @@ object WebViewSniffer {
                     CookieManager.getInstance().setAcceptCookie(true)
                     CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
 
-                    overlay.addView(
-                        webView,
-                        FrameLayout.LayoutParams.MATCH_PARENT,
-                        FrameLayout.LayoutParams.MATCH_PARENT
-                    )
+                    overlay.addView(webView, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
                     overlay.addView(spinner)
 
-                    // ---------- Cleanup ----------
                     fun cleanup() {
                         if (!done.compareAndSet(false, true)) return
                         main.post {
@@ -137,19 +117,16 @@ object WebViewSniffer {
                         main.postDelayed({ cleanup() }, delayMs)
                     }
 
-                    // ---------- WebViewClient: network sniff + JS console ----------
                     webView.webViewClient = object : WebViewClient() {
                         override fun shouldInterceptRequest(
                             view: WebView?,
                             request: WebResourceRequest?
                         ): WebResourceResponse? {
                             val u = request?.url?.toString() ?: return null
-                            // Log ALL request khi debug (chỉ in ra ClipboardLogger, không spam UI)
                             if (isMediaUrl(u)) {
                                 val ref = lastPageUrl[0]
                                 if (results.putIfAbsent(u, SniffResult(u, ref)) == null) {
-                                    ClipboardLogger.logAndCopy("SNIFF", "hit=${u.take(240)}")
-                                    // Có 2 hit là đủ, chờ thêm 2s cho chắc rồi đóng
+                                    ClipboardLogger.logAndCopy("SNIFF", "hit=${u}")
                                     if (results.size >= 2) scheduleFinish(2000)
                                     else scheduleFinish(5000)
                                 }
@@ -166,12 +143,9 @@ object WebViewSniffer {
                             spinner.visibility = View.GONE
                             view?.evaluateJavascript(AUTOPLAY_JS, null)
                             view?.evaluateJavascript(DPAD_JS, null)
-                            // Diagnostic: hook fetch/XHR để thấy response của API
-                            view?.evaluateJavascript(NETWORK_HOOK_JS, null)
                         }
                     }
 
-                    // Nhận console.log của JS hook → ghi vào ClipboardLogger
                     webView.webChromeClient = object : WebChromeClient() {
                         override fun onConsoleMessage(msg: ConsoleMessage?): Boolean {
                             val m = msg?.message() ?: return false
@@ -182,32 +156,23 @@ object WebViewSniffer {
                         }
                     }
 
-                    // ---------- D-pad cursor (Golden Rule #4) ----------
                     webView.setOnKeyListener { _, keyCode, event ->
                         if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
                         when (keyCode) {
-                            KeyEvent.KEYCODE_DPAD_UP ->
-                                { webView.evaluateJavascript("__dpadMove(0,-25)", null); true }
-                            KeyEvent.KEYCODE_DPAD_DOWN ->
-                                { webView.evaluateJavascript("__dpadMove(0, 25)", null); true }
-                            KeyEvent.KEYCODE_DPAD_LEFT ->
-                                { webView.evaluateJavascript("__dpadMove(-25,0)", null); true }
-                            KeyEvent.KEYCODE_DPAD_RIGHT ->
-                                { webView.evaluateJavascript("__dpadMove( 25,0)", null); true }
-                            KeyEvent.KEYCODE_DPAD_CENTER,
-                            KeyEvent.KEYCODE_ENTER ->
-                                { webView.evaluateJavascript("__dpadClick()", null); true }
+                            KeyEvent.KEYCODE_DPAD_UP -> { webView.evaluateJavascript("__dpadMove(0,-25)", null); true }
+                            KeyEvent.KEYCODE_DPAD_DOWN -> { webView.evaluateJavascript("__dpadMove(0, 25)", null); true }
+                            KeyEvent.KEYCODE_DPAD_LEFT -> { webView.evaluateJavascript("__dpadMove(-25,0)", null); true }
+                            KeyEvent.KEYCODE_DPAD_RIGHT -> { webView.evaluateJavascript("__dpadMove( 25,0)", null); true }
+                            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> { webView.evaluateJavascript("__dpadClick()", null); true }
                             else -> false
                         }
                     }
 
-                    // ---------- Attach + load ----------
                     try {
                         (activity.window.decorView as? ViewGroup)?.addView(overlay)
                     } catch (_: Throwable) {}
+                    
                     webView.loadUrl(url)
-
-                    // Hard timeout
                     main.postDelayed({ cleanup() }, timeoutMs)
 
                 } catch (t: Throwable) {
@@ -218,42 +183,26 @@ object WebViewSniffer {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Helpers
-    // ------------------------------------------------------------------
     private fun sortResults(list: List<SniffResult>): List<SniffResult> =
-        list.sortedWith(
-            compareBy(
-                { if (it.url.contains(".m3u8", true)) 0 else 1 },
-                {
-                    when {
-                        it.url.contains("stellarconductornexus") -> 0
-                        it.url.contains("vaplayer") -> 1
-                        it.url.contains("vidsrc") -> 2
-                        it.url.contains("playervdofree") -> 3
-                        else -> 4
-                    }
-                }
-            )
-        )
+        list.sortedWith(compareBy({ if (it.url.contains(".m3u8", true)) 0 else 1 }))
 
     private fun isMediaUrl(u: String): Boolean {
         val l = u.lowercase()
         if (AD_DOMAINS.any { l.contains(it) }) return false
-        // HLS segment (.ts, .m4s, .key, .aac, .vtt) — bỏ qua, chỉ lấy playlist
+        
+        // Bỏ qua các file segment
         val segmentPattern = Regex(""".*\.(ts|m4s|key|aac|vtt|srt|jpg|png|webp|gif)(\?.*)?$""")
         if (segmentPattern.matches(l)) return false
-        // Playlist / video
-        if (l.contains(".m3u8")) return true
-        if (l.contains(".mp4")) return true
-        if (l.contains("/manifest")) return true
-        if (l.contains("/playlist") && (l.contains("m3u") || l.contains("hls"))) return true
+        
+        // Chấp nhận m3u8, mp4
+        if (l.contains(".m3u8") || l.contains(".mp4")) return true
+        
+        // Chấp nhận các link gateway, manifest, playlist đặc biệt
+        if (l.contains("/manifest") || l.contains("/playlist") || l.contains("/pl/") || l.contains("juniperandjade.space")) return true
+        
         return false
     }
 
-    // ==================================================================
-    // JS injection
-    // ==================================================================
     private const val AUTOPLAY_JS = """
     (function(){
       var sels=['button[aria-label*="lay" i]','.jw-bigplay','.vjs-big-play-button','#bigPlay','#play','video'];
@@ -286,41 +235,6 @@ object WebViewSniffer {
         ['mousedown','mouseup','click'].forEach(function(t){try{el.dispatchEvent(new MouseEvent(t,{bubbles:true}));}catch(e){}});
       };
       render();
-    })();
-    """
-
-    /**
-     * Hook fetch + XHR để log URL và response body ra console.
-     * Rất hữu ích để debug khi m3u8 không xuất hiện.
-     */
-    private const val NETWORK_HOOK_JS = """
-    (function(){
-      if(window.__netHook)return;window.__netHook=true;
-
-      var origFetch=window.fetch;
-      if(origFetch){
-        window.fetch=function(){
-          var u=(arguments[0]&&arguments[0].url)||arguments[0]||'';
-          console.log('[HOOK] fetch '+u);
-          var p=origFetch.apply(this,arguments);
-          p.then(function(r){
-            try{r.clone().text().then(function(t){
-              console.log('[HOOK] resp '+u+' => '+t.substring(0,400));
-            }).catch(function(){});}catch(e){}
-          });
-          return p;
-        };
-      }
-
-      var origOpen=XMLHttpRequest.prototype.open;
-      XMLHttpRequest.prototype.open=function(m,u){
-        console.log('[HOOK] xhr '+m+' '+u);
-        var self=this;
-        this.addEventListener('load',function(){
-          try{console.log('[HOOK] resp '+u+' => '+(self.responseText||'').substring(0,400));}catch(e){}
-        });
-        return origOpen.apply(this,arguments);
-      };
     })();
     """
 }
