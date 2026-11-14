@@ -249,31 +249,58 @@ class MoviesHDHub : MainAPI() {
                 )
                 ClipboardLogger.logAndCopy("SERVER-$nume", "sniffed=${sniffed.size}")
 
-                // CHỈ XỬ LÝ M3U8 VÀ MP4 (Bỏ qua link rác)
+                // Xử lý phát link
                 for (s in sniffed) {
                     if (!s.url.contains(".m3u8", true) && !s.url.contains(".mp4", true)) {
                         continue
                     }
-                    
-                    val ref: String = s.referer
-                    val hdrs: Map<String, String> = streamHeaders(s.referer)
+
+                    // Fix cứng Referer cho các domain đặc biệt để tránh lỗi 403
+                    val domainRef = when {
+                        s.url.contains("juniperandjade.space") -> "https://juniperandjade.space/"
+                        s.url.contains("vaplayer") -> "https://streamdata.vaplayer.ru/"
+                        else -> s.referer
+                    }
+                    val hdrs: Map<String, String> = streamHeaders(domainRef)
                     
                     ClipboardLogger.logAndCopy("EMIT", "url=${s.url}")
 
                     if (s.url.contains(".m3u8", true)) {
+                        // 1. Ưu tiên phát link trực tiếp để ExoPlayer tự xử lý (tránh bị treo do M3u8Helper)
                         try {
-                            M3u8Helper.generateM3u8(
+                            callback(newExtractorLink(
+                                source = "$name [$label]",
+                                name = "$name [$label] • HLS",
+                                url = s.url,
+                                type = ExtractorLinkType.M3U8
+                            ) {
+                                this.referer = domainRef
+                                this.headers = hdrs
+                            })
+                            emitted = true
+                        } catch (t: Throwable) {
+                            ClipboardLogger.logAndCopy("DIRECT-FAIL", "${t.message}")
+                        }
+
+                        // 2. Chạy M3u8Helper để bóc tách đa chất lượng (nếu thành công)
+                        try {
+                            val generatedLinks = M3u8Helper.generateM3u8(
                                 source = "$name [$label]",
                                 streamUrl = s.url,
-                                referer = ref,
+                                referer = domainRef,
                                 headers = hdrs
-                            ).forEach {
-                                callback(it)
-                                emitted = true
+                            )
+                            ClipboardLogger.logAndCopy("M3U8-RES", "found ${generatedLinks.size} links")
+                            if (generatedLinks.isNotEmpty()) {
+                                generatedLinks.forEach {
+                                    callback(it)
+                                    emitted = true
+                                }
                             }
                         } catch (t: Throwable) {
                             ClipboardLogger.logAndCopy("M3U8-FAIL", "${t.message}")
                         }
+                        
                     } else if (s.url.contains(".mp4", true)) {
                         try {
                             callback(newExtractorLink(
@@ -282,7 +309,7 @@ class MoviesHDHub : MainAPI() {
                                 url = s.url,
                                 type = ExtractorLinkType.VIDEO
                             ) {
-                                this.referer = ref
+                                this.referer = domainRef
                                 this.headers = hdrs
                             })
                             emitted = true
