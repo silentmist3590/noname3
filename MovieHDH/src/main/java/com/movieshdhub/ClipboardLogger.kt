@@ -17,7 +17,9 @@ object ClipboardLogger {
         val ctx = CommonActivity.activity ?: return
         try {
             (ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
-                .setPrimaryClip(ClipData.newPlainText("MoviesHDHub Log", buffer.joinToString("\n")))
+                .setPrimaryClip(
+                    ClipData.newPlainText("MoviesHDHub Log", buffer.joinToString("\n"))
+                )
         } catch (t: Throwable) {
             Log.e(TAG, "clipboard write failed: ${t.message}")
         }
