@@ -16,6 +16,7 @@ class MoviesHDHub : MainAPI() {
     override var hasQuickSearch = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
     override val usesWebView = false
+    
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Featured & Latest",
         "$mainUrl/movies/" to "All Movies",
@@ -28,6 +29,7 @@ class MoviesHDHub : MainAPI() {
         "$mainUrl/genre/science-fiction/" to "Sci-Fi",
         "$mainUrl/genre/thriller/" to "Thriller"
     )
+
     private val tmdbApi = "https://tmdb-proxy.silentmist3590.workers.dev/3"
     private val tmdbKey = "c3d997893bf55c01f39f821b53781547"
 
@@ -304,26 +306,17 @@ class MoviesHDHub : MainAPI() {
     }
 
     // =====================================================================
-    // FETCH EMBED URL (Xử lý nonce và fallback)
+    // FETCH EMBED URL (Đã sửa lỗi type mismatch)
     // =====================================================================
     private suspend fun fetchEmbedUrl(postId: String, nume: String, type: String, referer: String, nonce: String): String? {
-        // 1. Thử gọi API chuẩn mới của DooPlay
+        // 1. Thử gọi API chuẩn mới của DooPlay qua GET
         try {
-            val jsonBody = JSONObject().apply {
-                put("id", postId)
-                put("type", type)
-                put("nume", nume)
-            }.toString()
+            val apiUrl = "$mainUrl/wp-json/dooplayer/v2/get_player_info?id=$postId&type=$type&nume=$nume"
             val reqHeaders = headers(referer).toMutableMap()
-            reqHeaders["Content-Type"] = "application/json"
             reqHeaders["X-Requested-With"] = "XMLHttpRequest"
             if (nonce.isNotBlank()) reqHeaders["X-WP-Nonce"] = nonce
 
-            val resp = app.post(
-                "$mainUrl/wp-json/dooplayer/v2/get_player_info",
-                headers = reqHeaders,
-                data = jsonBody
-            ).text
+            val resp = app.get(apiUrl, headers = reqHeaders).text
             ClipboardLogger.logAndCopy("V2-$nume", resp)
             val json = JSONObject(resp)
             if (json.optBoolean("status", false)) {
@@ -334,9 +327,14 @@ class MoviesHDHub : MainAPI() {
             ClipboardLogger.logAndCopy("V2-$nume", "fail: ${e.message}")
         }
 
-        // 2. Fallback gọi admin-ajax.php với nonce và type
+        // 2. Fallback gọi admin-ajax.php (Truyền Map)
         try {
-            val body = "action=doo_player_ajax&post=$postId&nume=$nume&type=$type"
+            val formData = mapOf(
+                "action" to "doo_player_ajax",
+                "post" to postId,
+                "nume" to nume,
+                "type" to type
+            )
             val reqHeaders = headers(referer).toMutableMap()
             reqHeaders["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
             reqHeaders["X-Requested-With"] = "XMLHttpRequest"
@@ -344,8 +342,9 @@ class MoviesHDHub : MainAPI() {
             val resp = app.post(
                 "$mainUrl/wp-admin/admin-ajax.php",
                 headers = reqHeaders,
-                data = body
+                data = formData // Sử dụng Map
             ).text
+            
             ClipboardLogger.logAndCopy("AJAX-$nume", resp)
             val json = JSONObject(resp)
             val embed = json.optString("embed_url")
