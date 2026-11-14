@@ -22,7 +22,7 @@ class MoviesHDHub : MainAPI() {
     private val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
-    /** Golden Rule #7 */
+    /** Golden Rule #7 — headers cho request HTML/API. */
     private fun headers(referer: String = "$mainUrl/") = mapOf(
         "User-Agent" to UA,
         "Referer" to referer,
@@ -32,8 +32,10 @@ class MoviesHDHub : MainAPI() {
     )
 
     /**
-     * Headers dùng riêng cho stream (m3u8/mp4) — gộp Referer vào map
-     * để tránh phụ thuộc tham số `referer` có signature thay đổi giữa các version.
+     * Map headers để truyền cho `M3u8Helper` và `ExtractorLink`.
+     * Trong version CloudStream của bạn, param `referer` có type
+     * `Map<String, String>?` (không phải String) — nên ta gộp luôn
+     * Referer vào Map này.
      */
     private fun streamHeaders(referer: String): Map<String, String> =
         headers(referer) + mapOf("Referer" to referer)
@@ -58,7 +60,7 @@ class MoviesHDHub : MainAPI() {
     }
 
     // =====================================================================
-    // SEARCH — JSON API (HTML search broken)
+    // SEARCH — JSON API (HTML search page của site bị broken)
     // =====================================================================
     override suspend fun search(query: String): List<SearchResponse> {
         ClipboardLogger.logAndCopy("SEARCH", "query=$query")
@@ -245,7 +247,7 @@ class MoviesHDHub : MainAPI() {
     }
 
     // =====================================================================
-    // LOAD LINKS — POST admin-ajax → WebView sniff → m3u8/mp4
+    // LOAD LINKS — POST admin-ajax → WebView sniff → emit
     // =====================================================================
     override suspend fun loadLinks(
         data: String,
@@ -290,14 +292,16 @@ class MoviesHDHub : MainAPI() {
                 )
                 ClipboardLogger.logAndCopy("SERVER-$nume", "sniffed=${sniffed.size}")
 
-                // ============== EMIT — chỉ dùng headers, KHÔNG dùng referer ==============
+                // ============== EMIT — referer LUÔN là Map ==============
                 for (s in sniffed) {
+                    val hdrs: Map<String, String> = streamHeaders(s.referer)
+
                     if (s.url.contains(".m3u8", true)) {
                         try {
                             M3u8Helper.generateM3u8(
                                 source = "$name [$label]",
                                 streamUrl = s.url,
-                                headers = streamHeaders(s.referer)
+                                referer = hdrs
                             ).forEach {
                                 callback(it)
                                 emitted = true
@@ -307,14 +311,16 @@ class MoviesHDHub : MainAPI() {
                         }
                     } else if (s.url.contains(".mp4", true)) {
                         try {
-                            callback(newExtractorLink(
-                                source = "$name [$label]",
-                                name = "$name [$label] • MP4",
-                                url = s.url,
-                                type = ExtractorLinkType.VIDEO
-                            ) {
-                                this.headers = streamHeaders(s.referer)
-                            })
+                            callback(
+                                newExtractorLink(
+                                    source = "$name [$label]",
+                                    name = "$name [$label] • MP4",
+                                    url = s.url,
+                                    type = ExtractorLinkType.VIDEO
+                                ) {
+                                    this.referer = hdrs
+                                }
+                            )
                             emitted = true
                         } catch (t: Throwable) {
                             ClipboardLogger.logAndCopy("MP4", "fail: ${t.message}")
@@ -331,7 +337,6 @@ class MoviesHDHub : MainAPI() {
         return emitted
     }
 
-    /** Body chính xác 40B theo cURL: action=doo_player_ajax&post=X&nume=Y */
     private suspend fun fetchEmbedUrl(
         postId: String,
         nume: String,
