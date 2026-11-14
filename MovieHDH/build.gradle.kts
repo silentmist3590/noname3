@@ -1,3 +1,5 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins {
     id("com.android.library")
     kotlin("android")
@@ -8,7 +10,7 @@ cloudstream {
     language = "en"
     description = "MoviesHDHub - Watch FREE Movies Online HD"
     authors = listOf("TJ-Plugins")
-    version = 2
+    version = 3
     status = 1
     tvTypes = listOf("Movie", "TvSeries")
 }
@@ -27,9 +29,11 @@ android {
     }
 }
 
-// Tự động đồng bộ JVM Target cho cả Java và Kotlin
+// Đồng bộ JVM Target cho Kotlin compiler
 kotlin {
-    jvmToolchain(17)
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
+    }
 }
 
 dependencies {
