@@ -6,7 +6,7 @@ cloudstream {
     language = "en"
     description = "MoviesHDHub - Watch FREE Movies Online HD"
     authors = listOf("TJ-Plugins")
-    version = 10
+    version = 11
     status = 1
     tvTypes = listOf("Movie", "TvSeries")
     iconUrl = "https://movieshdhub.com/favicon.ico"
