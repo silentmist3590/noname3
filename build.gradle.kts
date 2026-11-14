@@ -1,4 +1,3 @@
-import com.android.build.gradle.BaseExtension
 import com.android.build.gradle.LibraryExtension
 import com.lagradost.cloudstream3.gradle.CloudstreamExtension
 import org.gradle.api.tasks.Delete
@@ -31,12 +30,12 @@ allprojects {
     }
 }
 
-// Các hàm helper để cấu hình dễ dàng trong subprojects
+// Sửa BaseExtension thành LibraryExtension để nhận diện compileSdk
 fun Project.cloudstream(configuration: CloudstreamExtension.() -> Unit) = 
     extensions.getByName<CloudstreamExtension>("cloudstream").configuration()
     
-fun Project.android(configuration: BaseExtension.() -> Unit) = 
-    extensions.getByName<BaseExtension>("android").configuration()
+fun Project.android(configuration: LibraryExtension.() -> Unit) = 
+    extensions.getByName<LibraryExtension>("android").configuration()
 
 subprojects {
     apply(plugin = "com.android.library")
@@ -48,9 +47,8 @@ subprojects {
     }
 
     android {
-        // LƯU Ý: Không set namespace ở đây vì mỗi module có namespace riêng.
-        // Namespace sẽ được khai báo trong file build.gradle.kts của từng module (MovieHDH, Cinezo...).
-
+        // ĐÃ BỎ namespace Ở ĐÂY ĐỂ NHƯỜNG QUYỀN CHO TỪNG MODULE (tránh ghi đè com.movieshdhub)
+        
         compileSdk = 35
 
         defaultConfig {
@@ -58,14 +56,13 @@ subprojects {
             targetSdk = 35
         }
 
-        // ĐỒNG BỘ JVM TARGET: Cả Java và Kotlin đều dùng 17
         compileOptions {
             sourceCompatibility = JavaVersion.VERSION_17
             targetCompatibility = JavaVersion.VERSION_17
         }
     }
 
-    // Đồng bộ Kotlin JVM Target (đặt ngoài block android)
+    // Đồng bộ JVM Target cho Kotlin
     tasks.withType<KotlinJvmCompile>().configureEach {
         compilerOptions {
             jvmTarget.set(JvmTarget.JVM_17)
@@ -89,7 +86,6 @@ subprojects {
     }
 }
 
-// Sửa lỗi deprecated task
 tasks.register<Delete>("clean") {
     delete(rootProject.layout.buildDirectory)
 }
