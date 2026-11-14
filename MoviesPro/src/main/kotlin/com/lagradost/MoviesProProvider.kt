@@ -6,7 +6,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import com.movieuniverse.MovieuniverseProvider
 import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.Jsoup
@@ -33,7 +32,6 @@ class MoviesProProvider : MainAPI() {
 
     private val ua = "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
     private val hdr get() = mapOf("User-Agent" to ua, "Referer" to "$mainUrl/")
-    private val mu by lazy { MovieuniverseProvider() }
 
     private suspend fun document(url: String): org.jsoup.nodes.Document {
         MoviesProClipboardLogger.stage("HTTP/GET", url)
@@ -213,13 +211,6 @@ class MoviesProProvider : MainAPI() {
                 MoviesProClipboardLogger.stage("Filemoon/KẾT QUẢ", "tổng $n link")
             }
 
-            // ===== Dự phòng: Movieuniverse =====
-            if (n == 0) {
-                val target = if (isMovie) "https://movieuniverse.skin/watch-movieuniverse-${p[1]}"
-                else "https://movieuniverse.skin/watch-tv-${p[0]}&season=${p[1]}&episode=${p[2]}"
-                MoviesProClipboardLogger.stage("LINKS/FALLBACK", target)
-                if (mu.loadLinks(target, isCasting, subtitleCallback, callback)) n++
-            }
             n > 0
         } catch (e: Throwable) {
             if (e is java.util.concurrent.CancellationException) throw e
