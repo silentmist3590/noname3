@@ -4,7 +4,7 @@ include(":MoviesPro")
 include(":Vidnest")
 include(":Cinezo")
 include(":Vidfyi")
-include(":MoviesHDH")
+include(":MovieHDH")
 
 
 pluginManagement {
