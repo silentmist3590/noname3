@@ -30,9 +30,6 @@ class MoviesHDHub : MainAPI() {
         "$mainUrl/genre/thriller/" to "Thriller"
     )
 
-    private val tmdbApi = "https://tmdb-proxy.silentmist3590.workers.dev/3"
-    private val tmdbKey = "c3d997893bf55c01f39f821b53781547"
-
     private val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
@@ -67,7 +64,7 @@ class MoviesHDHub : MainAPI() {
     }
 
     // =====================================================================
-    // SEARCH (Fallback HTML vì API đã bị chặn nonce)
+    // SEARCH
     // =====================================================================
     override suspend fun search(query: String): List<SearchResponse> {
         ClipboardLogger.logAndCopy("SEARCH", "query=$query")
@@ -223,7 +220,6 @@ class MoviesHDHub : MainAPI() {
                 Regex("/movies?/([^/]+)/?$").find(data)?.groupValues?.get(1).orEmpty()
             }
 
-        // Bóc tách nonce để bypass bảo mật
         val nonce = doc.selectFirst("script:containsData(live_search-js-extra)")?.data()
             ?.let { Regex(""""nonce":"([^"]+)"""").find(it)?.groupValues?.get(1) }
             ?: ""
@@ -242,15 +238,14 @@ class MoviesHDHub : MainAPI() {
             val type = li.attr("data-type").ifBlank { "movie" }
             val label = li.selectFirst("span.title")?.text()?.trim() ?: "Server $nume"
             try {
-                // Lấy embed URL
-                val embed = fetchEmbedUrl(postId, nume, type, data, nonce)
+                // Chỉ dùng admin-ajax.php vì log cho thấy API V2 bị lỗi 403
+                val embed = fetchEmbedUrl(postId, nume, type, data)
                 if (embed.isNullOrBlank()) {
                     ClipboardLogger.logAndCopy("SERVER-$nume", "no embed url")
                     continue
                 }
                 ClipboardLogger.logAndCopy("SERVER-$nume", "embed=$embed")
 
-                // Sniff bằng WebView
                 val sniffed = WebViewSniffer.sniff(
                     url = embed,
                     referer = data,
@@ -259,26 +254,34 @@ class MoviesHDHub : MainAPI() {
                 )
                 ClipboardLogger.logAndCopy("SERVER-$nume", "sniffed=${sniffed.size}")
 
-                // Phát link
+                // Phát link (Đã sửa để chấp nhận mọi URL)
                 for (s in sniffed) {
                     val ref: String = s.referer
                     val hdrs: Map<String, String> = streamHeaders(s.referer)
+                    
+                    ClipboardLogger.logAndCopy("EMIT", "url=${s.url}")
 
-                    if (s.url.contains(".m3u8", true)) {
-                        try {
-                            M3u8Helper.generateM3u8(
-                                source = "$name [$label]",
-                                streamUrl = s.url,
-                                referer = ref,
-                                headers = hdrs
-                            ).forEach {
+                    // 1. Thử ép qua M3u8Helper cho mọi link (kể cả gateway)
+                    try {
+                        val generatedLinks = M3u8Helper.generateM3u8(
+                            source = "$name [$label]",
+                            streamUrl = s.url,
+                            referer = ref,
+                            headers = hdrs
+                        )
+                        if (generatedLinks.isNotEmpty()) {
+                            generatedLinks.forEach {
                                 callback(it)
                                 emitted = true
                             }
-                        } catch (t: Throwable) {
-                            ClipboardLogger.logAndCopy("M3U8", "fail: ${t.message}")
+                            continue // Nếu thành công thì bỏ qua kiểm tra MP4 bên dưới
                         }
-                    } else if (s.url.contains(".mp4", true)) {
+                    } catch (t: Throwable) {
+                        ClipboardLogger.logAndCopy("M3U8-FAIL", "${t.message}")
+                    }
+
+                    // 2. Fallback nếu là link MP4 trực tiếp
+                    if (s.url.contains(".mp4", true)) {
                         try {
                             callback(newExtractorLink(
                                 source = "$name [$label]",
@@ -291,7 +294,7 @@ class MoviesHDHub : MainAPI() {
                             })
                             emitted = true
                         } catch (t: Throwable) {
-                            ClipboardLogger.logAndCopy("MP4", "fail: ${t.message}")
+                            ClipboardLogger.logAndCopy("MP4-FAIL", "${t.message}")
                         }
                     }
                 }
@@ -306,28 +309,9 @@ class MoviesHDHub : MainAPI() {
     }
 
     // =====================================================================
-    // FETCH EMBED URL (Đã sửa lỗi type mismatch)
+    // FETCH EMBED URL (Dùng admin-ajax.php vì ổn định hơn)
     // =====================================================================
-    private suspend fun fetchEmbedUrl(postId: String, nume: String, type: String, referer: String, nonce: String): String? {
-        // 1. Thử gọi API chuẩn mới của DooPlay qua GET
-        try {
-            val apiUrl = "$mainUrl/wp-json/dooplayer/v2/get_player_info?id=$postId&type=$type&nume=$nume"
-            val reqHeaders = headers(referer).toMutableMap()
-            reqHeaders["X-Requested-With"] = "XMLHttpRequest"
-            if (nonce.isNotBlank()) reqHeaders["X-WP-Nonce"] = nonce
-
-            val resp = app.get(apiUrl, headers = reqHeaders).text
-            ClipboardLogger.logAndCopy("V2-$nume", resp)
-            val json = JSONObject(resp)
-            if (json.optBoolean("status", false)) {
-                val embed = json.optJSONObject("data")?.optString("embed_url")
-                if (!embed.isNullOrBlank()) return embed
-            }
-        } catch (e: Exception) {
-            ClipboardLogger.logAndCopy("V2-$nume", "fail: ${e.message}")
-        }
-
-        // 2. Fallback gọi admin-ajax.php (Truyền Map)
+    private suspend fun fetchEmbedUrl(postId: String, nume: String, type: String, referer: String): String? {
         try {
             val formData = mapOf(
                 "action" to "doo_player_ajax",
@@ -342,7 +326,7 @@ class MoviesHDHub : MainAPI() {
             val resp = app.post(
                 "$mainUrl/wp-admin/admin-ajax.php",
                 headers = reqHeaders,
-                data = formData // Sử dụng Map
+                data = formData
             ).text
             
             ClipboardLogger.logAndCopy("AJAX-$nume", resp)
@@ -352,21 +336,6 @@ class MoviesHDHub : MainAPI() {
         } catch (e: Exception) {
             ClipboardLogger.logAndCopy("AJAX-$nume", "fail: ${e.message}")
         }
-
         return null
-    }
-
-    // =====================================================================
-    // TMDB helper
-    // =====================================================================
-    suspend fun getTmdbId(title: String, year: Int?, isTv: Boolean): String? {
-        return try {
-            val t = if (isTv) "tv" else "movie"
-            val u = "$tmdbApi/search/$t?api_key=$tmdbKey" +
-                    "&query=${URLEncoder.encode(title, "UTF-8")}" +
-                    (year?.let { "&year=$it" } ?: "")
-            val r = app.get(u, headers = headers()).text
-            JSONObject(r).optJSONArray("results")?.optJSONObject(0)?.optInt("id")?.toString()
-        } catch (_: Throwable) { null }
     }
 }
