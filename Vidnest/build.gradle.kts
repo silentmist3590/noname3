@@ -11,3 +11,4 @@ cloudstream {
     tvTypes = listOf("Movie", "TvSeries")
     iconUrl = "https://vidnext.pro/favicon.svg"
 }
+android { namespace = "com.lagradost" }
