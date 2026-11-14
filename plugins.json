@@ -1,0 +1,142 @@
+[
+  {
+    "name": "Vidnest",
+    "internalName": "Vidnest",
+    "version": 1,
+    "status": 1,
+    "apiVersion": 1,
+    "fileSize": 39896,
+    "description": "Plugin Vidnest",
+    "authors": [
+      "Silentmist3590"
+    ],
+    "repositoryUrl": "https://github.com/silentmist3590/noname3",
+    "url": "https://raw.githubusercontent.com/silentmist3590/noname3/builds/Vidnest.cs3",
+    "iconUrl": "",
+    "tvTypes": [
+      "Movie",
+      "TvSeries"
+    ],
+    "language": "en"
+  },
+  {
+    "name": "SuperembedProvider",
+    "internalName": "SuperembedProvider",
+    "version": 7,
+    "status": 1,
+    "apiVersion": 1,
+    "fileSize": 33108,
+    "description": "Plugin SuperembedProvider",
+    "authors": [
+      "Silentmist3590"
+    ],
+    "repositoryUrl": "https://github.com/silentmist3590/noname3",
+    "url": "https://raw.githubusercontent.com/silentmist3590/noname3/builds/SuperembedProvider.cs3",
+    "iconUrl": "",
+    "tvTypes": [
+      "Movie",
+      "TvSeries"
+    ],
+    "language": "en"
+  },
+  {
+    "name": "MoviesPro",
+    "internalName": "MoviesPro",
+    "version": 4,
+    "status": 1,
+    "apiVersion": 1,
+    "fileSize": 40560,
+    "description": "Plugin MoviesPro",
+    "authors": [
+      "Silentmist3590"
+    ],
+    "repositoryUrl": "https://github.com/silentmist3590/noname3",
+    "url": "https://raw.githubusercontent.com/silentmist3590/noname3/builds/MoviesPro.cs3",
+    "iconUrl": "",
+    "tvTypes": [
+      "Movie",
+      "TvSeries"
+    ],
+    "language": "en"
+  },
+  {
+    "name": "Cinezo",
+    "internalName": "Cinezo",
+    "version": 1,
+    "status": 1,
+    "apiVersion": 1,
+    "fileSize": 39153,
+    "description": "Plugin Cinezo",
+    "authors": [
+      "Silentmist3590"
+    ],
+    "repositoryUrl": "https://github.com/silentmist3590/noname3",
+    "url": "https://raw.githubusercontent.com/silentmist3590/noname3/builds/Cinezo.cs3",
+    "iconUrl": "",
+    "tvTypes": [
+      "Movie",
+      "TvSeries"
+    ],
+    "language": "en"
+  },
+  {
+    "name": "MovieHDH",
+    "internalName": "MovieHDH",
+    "version": 11,
+    "status": 1,
+    "apiVersion": 1,
+    "fileSize": 37989,
+    "description": "Plugin MovieHDH",
+    "authors": [
+      "Silentmist3590"
+    ],
+    "repositoryUrl": "https://github.com/silentmist3590/noname3",
+    "url": "https://raw.githubusercontent.com/silentmist3590/noname3/builds/MovieHDH.cs3",
+    "iconUrl": "",
+    "tvTypes": [
+      "Movie",
+      "TvSeries"
+    ],
+    "language": "en"
+  },
+  {
+    "name": "Movieuniverse",
+    "internalName": "Movieuniverse",
+    "version": 15,
+    "status": 1,
+    "apiVersion": 1,
+    "fileSize": 67840,
+    "description": "Plugin Movieuniverse",
+    "authors": [
+      "Silentmist3590"
+    ],
+    "repositoryUrl": "https://github.com/silentmist3590/noname3",
+    "url": "https://raw.githubusercontent.com/silentmist3590/noname3/builds/Movieuniverse.cs3",
+    "iconUrl": "",
+    "tvTypes": [
+      "Movie",
+      "TvSeries"
+    ],
+    "language": "en"
+  },
+  {
+    "name": "Vidfyi",
+    "internalName": "Vidfyi",
+    "version": -1,
+    "status": 1,
+    "apiVersion": 1,
+    "fileSize": 48766,
+    "description": "Plugin Vidfyi",
+    "authors": [
+      "Silentmist3590"
+    ],
+    "repositoryUrl": "https://github.com/silentmist3590/noname3",
+    "url": "https://raw.githubusercontent.com/silentmist3590/noname3/builds/Vidfyi.cs3",
+    "iconUrl": "",
+    "tvTypes": [
+      "Movie",
+      "TvSeries"
+    ],
+    "language": "en"
+  }
+]

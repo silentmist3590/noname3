@@ -1,0 +1,8 @@
+{
+  "name": "Noname CloudStream Repository",
+  "description": "Kho plugin phim ti\u1ebfng Vi\u1ec7t",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/silentmist3590/noname3/builds/plugins.json"
+  ]
+}
