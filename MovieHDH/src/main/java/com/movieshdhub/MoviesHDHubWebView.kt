@@ -25,8 +25,12 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
-// Đã thêm trường cookies vào data class
-data class SniffResult(val url: String, val referer: String, val cookies: String)
+data class SniffResult(
+    val url: String,
+    val referer: String,
+    val cookies: String,
+    val requestHeaders: Map<String, String>
+)
 
 object WebViewSniffer {
 
@@ -104,13 +108,25 @@ object WebViewSniffer {
 
                     fun cleanup() {
                         if (!done.compareAndSet(false, true)) return
+                        // Refresh lại cookie cho tất cả URL trước khi trả về
+                        val finalResults = results.values.map { r ->
+                            try {
+                                val freshJar = CookieManager.getInstance()
+                                    .getCookie(r.url).orEmpty()
+                                val merged = listOf(r.cookies, freshJar)
+                                    .filter { it.isNotBlank() }
+                                    .distinct()
+                                    .joinToString("; ")
+                                r.copy(cookies = merged)
+                            } catch (_: Throwable) { r }
+                        }
                         main.post {
                             try { overlay.removeAllViews() } catch (_: Throwable) {}
                             try { (overlay.parent as? ViewGroup)?.removeView(overlay) } catch (_: Throwable) {}
                             try { webView.stopLoading() } catch (_: Throwable) {}
                             try { webView.loadUrl("about:blank") } catch (_: Throwable) {}
                             try { webView.destroy() } catch (_: Throwable) {}
-                            finish(sortResults(results.values.toList()))
+                            finish(sortResults(finalResults))
                         }
                     }
 
@@ -126,15 +142,35 @@ object WebViewSniffer {
                             val u = request?.url?.toString() ?: return null
                             if (isMediaUrl(u)) {
                                 val ref = lastPageUrl[0]
-                                val cookies = try {
-                                    val host = android.net.Uri.parse(u).host ?: ""
-                                    CookieManager.getInstance().getCookie("https://$host/").orEmpty()
+                                val reqHdrs = try {
+                                    request.requestHeaders ?: emptyMap()
+                                } catch (_: Throwable) { emptyMap() }
+
+                                // Lấy cookie từ chính header của request (chính xác nhất)
+                                val cookieFromReq = reqHdrs["Cookie"]
+                                    ?: reqHdrs["cookie"]
+                                    ?: ""
+                                val cookieFromJar = try {
+                                    CookieManager.getInstance().getCookie(u).orEmpty()
                                 } catch (_: Throwable) { "" }
 
-                                if (results.putIfAbsent(u, SniffResult(u, ref, cookies)) == null) {
-                                    ClipboardLogger.logAndCopy("SNIFF", "hit=${u.take(200)} | cookie=${cookies.take(60)}")
-                                    if (results.size >= 2) scheduleFinish(2000)
-                                    else scheduleFinish(5000)
+                                val cookies = if (cookieFromReq.isNotBlank()) {
+                                    if (cookieFromJar.isNotBlank() && !cookieFromJar.contains(cookieFromReq)) {
+                                        "$cookieFromReq; $cookieFromJar"
+                                    } else cookieFromReq
+                                } else cookieFromJar
+
+                                if (results.putIfAbsent(
+                                        u,
+                                        SniffResult(u, ref, cookies, reqHdrs)
+                                    ) == null
+                                ) {
+                                    ClipboardLogger.logAndCopy(
+                                        "SNIFF",
+                                        "hit=${u.take(180)} | cookie.len=${cookies.length}"
+                                    )
+                                    if (results.size >= 2) scheduleFinish(3500)
+                                    else scheduleFinish(6000)
                                 }
                             }
                             return null
@@ -190,7 +226,10 @@ object WebViewSniffer {
     }
 
     private fun sortResults(list: List<SniffResult>): List<SniffResult> =
-        list.sortedWith(compareBy({ if (it.url.contains(".m3u8", true)) 0 else 1 }))
+        list.sortedWith(compareBy(
+            { if (it.url.contains("/master.m3u8")) 0 else if (it.url.contains(".m3u8")) 1 else 2 },
+            { it.url.length }
+        ))
 
     private fun isMediaUrl(u: String): Boolean {
         val l = u.lowercase()
