@@ -1,5 +1,7 @@
 import com.android.build.gradle.BaseExtension
+import com.android.build.gradle.LibraryExtension
 import com.lagradost.cloudstream3.gradle.CloudstreamExtension
+import org.gradle.api.tasks.Delete
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 
@@ -15,14 +17,12 @@ buildscript {
     dependencies {
         classpath("com.android.tools.build:gradle:8.7.3")
         classpath("com.github.recloudstream:gradle:-SNAPSHOT")
-        // Phải >= 2.3.0 vì cloudstream3:pre-release dùng metadata Kotlin 2.4.0
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.0")
     }
 }
 
 allprojects {
     repositories {
-        // Mirror Aliyun đặt trước: tránh việc Maven Central chuyển hướng sang github.com (hay bị 504)
         maven("https://maven.aliyun.com/repository/public")
         maven("https://maven.aliyun.com/repository/google")
         google()
@@ -31,8 +31,12 @@ allprojects {
     }
 }
 
-fun Project.cloudstream(configuration: CloudstreamExtension.() -> Unit) = extensions.getByName<CloudstreamExtension>("cloudstream").configuration()
-fun Project.android(configuration: BaseExtension.() -> Unit) = extensions.getByName<BaseExtension>("android").configuration()
+// Các hàm helper để cấu hình dễ dàng trong subprojects
+fun Project.cloudstream(configuration: CloudstreamExtension.() -> Unit) = 
+    extensions.getByName<CloudstreamExtension>("cloudstream").configuration()
+    
+fun Project.android(configuration: BaseExtension.() -> Unit) = 
+    extensions.getByName<BaseExtension>("android").configuration()
 
 subprojects {
     apply(plugin = "com.android.library")
@@ -44,59 +48,48 @@ subprojects {
     }
 
     android {
-        namespace = "com.lagradost"
+        // LƯU Ý: Không set namespace ở đây vì mỗi module có namespace riêng.
+        // Namespace sẽ được khai báo trong file build.gradle.kts của từng module (MovieHDH, Cinezo...).
+
+        compileSdk = 35
+
         defaultConfig {
             minSdk = 21
-            compileSdkVersion(35)
             targetSdk = 35
         }
+
+        // ĐỒNG BỘ JVM TARGET: Cả Java và Kotlin đều dùng 17
         compileOptions {
-            sourceCompatibility = JavaVersion.VERSION_1_8
-            targetCompatibility = JavaVersion.VERSION_1_8
+            sourceCompatibility = JavaVersion.VERSION_17
+            targetCompatibility = JavaVersion.VERSION_17
         }
-        tasks.withType<KotlinJvmCompile> {
-            compilerOptions {
-                jvmTarget.set(JvmTarget.JVM_1_8)
-                freeCompilerArgs.addAll(
-                    "-Xno-call-assertions",
-                    "-Xno-param-assertions",
-                    "-Xno-receiver-assertions"
-                )
-            }
+    }
+
+    // Đồng bộ Kotlin JVM Target (đặt ngoài block android)
+    tasks.withType<KotlinJvmCompile>().configureEach {
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_17)
+            freeCompilerArgs.addAll(
+                "-Xno-call-assertions",
+                "-Xno-param-assertions",
+                "-Xno-receiver-assertions"
+            )
         }
     }
 
     dependencies {
         val cloudstream by configurations
         val implementation by configurations
+        
         cloudstream("com.lagradost:cloudstream3:pre-release")
         implementation(kotlin("stdlib"))
-        // Thư viện HTTP (app.get...) không còn đi kèm cloudstream.jar nên phải khai báo riêng
         implementation("com.github.Blatzar:NiceHttp:0.4.18")
         implementation("com.squareup.okhttp3:okhttp:4.12.0")
         implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1")
     }
 }
 
-task<Delete>("clean") {
+// Sửa lỗi deprecated task
+tasks.register<Delete>("clean") {
     delete(rootProject.layout.buildDirectory)
-}
-// Root build.gradle.kts
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-
-subprojects {
-    // Cấu hình cho tất cả các module con
-    afterEvaluate {
-        extensions.findByType<com.android.build.gradle.LibraryExtension>()?.apply {
-            compileOptions {
-                sourceCompatibility = JavaVersion.VERSION_17
-                targetCompatibility = JavaVersion.VERSION_17
-            }
-        }
-    }
-    tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile>().configureEach {
-        compilerOptions {
-            jvmTarget.set(JvmTarget.JVM_17)
-        }
-    }
 }
