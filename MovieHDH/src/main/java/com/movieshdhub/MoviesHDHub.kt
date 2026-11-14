@@ -14,8 +14,6 @@ class MoviesHDHub : MainAPI() {
     override var lang = "en"
     override var hasQuickSearch = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
-
-    // WebView chỉ dùng trong loadLinks (WebViewSniffer), không cần cho load/search
     override val usesWebView = false
 
     private val tmdbApi = "https://tmdb-proxy.silentmist3590.workers.dev/3"
@@ -24,7 +22,7 @@ class MoviesHDHub : MainAPI() {
     private val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
-    /** Golden Rule #7: headers đầy đủ. */
+    /** Golden Rule #7 */
     private fun headers(referer: String = "$mainUrl/") = mapOf(
         "User-Agent" to UA,
         "Referer" to referer,
@@ -32,6 +30,13 @@ class MoviesHDHub : MainAPI() {
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language" to "en-US,en;q=0.9"
     )
+
+    /**
+     * Headers dùng riêng cho stream (m3u8/mp4) — gộp Referer vào map
+     * để tránh phụ thuộc tham số `referer` có signature thay đổi giữa các version.
+     */
+    private fun streamHeaders(referer: String): Map<String, String> =
+        headers(referer) + mapOf("Referer" to referer)
 
     // =====================================================================
     // HOME
@@ -53,19 +58,15 @@ class MoviesHDHub : MainAPI() {
     }
 
     // =====================================================================
-    // SEARCH — dùng JSON API vì trang HTML search đang broken
+    // SEARCH — JSON API (HTML search broken)
     // =====================================================================
     override suspend fun search(query: String): List<SearchResponse> {
         ClipboardLogger.logAndCopy("SEARCH", "query=$query")
-
-        // 1) API JSON
         val api = searchByApi(query)
         if (api.isNotEmpty()) {
             ClipboardLogger.logAndCopy("SEARCH", "api returned ${api.size}")
             return api
         }
-
-        // 2) Fallback HTML
         val url = "$mainUrl/?s=${URLEncoder.encode(query, "UTF-8")}"
         val doc = try {
             app.get(url, headers = headers(url)).document
@@ -80,8 +81,7 @@ class MoviesHDHub : MainAPI() {
     }
 
     private suspend fun searchByApi(query: String): List<SearchResponse> {
-        val endpoint = "$mainUrl/wp-json/dooplay/search/"
-        val url = "$endpoint?keyword=${URLEncoder.encode(query, "UTF-8")}"
+        val url = "$mainUrl/wp-json/dooplay/search/?keyword=${URLEncoder.encode(query, "UTF-8")}"
         val raw = try {
             app.get(url, headers = headers(url) + mapOf(
                 "Accept" to "application/json, text/javascript, */*; q=0.01",
@@ -92,10 +92,8 @@ class MoviesHDHub : MainAPI() {
             return emptyList()
         }
         ClipboardLogger.logAndCopy("SEARCH-API", "raw=${raw.take(400)}")
-
-        val arr = try {
-            JSONObject(raw).optJSONArray("data")
-        } catch (_: Throwable) { null } ?: return emptyList()
+        val arr = try { JSONObject(raw).optJSONArray("data") } catch (_: Throwable) { null }
+            ?: return emptyList()
 
         val out = mutableListOf<SearchResponse>()
         for (i in 0 until arr.length()) {
@@ -107,8 +105,7 @@ class MoviesHDHub : MainAPI() {
             val poster = o.optString("poster")
                 .replace(Regex("/(w92|w154|w185|w300|w342|w780)/"), "/w500/")
                 .takeIf { it.startsWith("http") }
-            val isTv = o.optString("type").lowercase() == "tvshows" ||
-                    href.contains("/tvshows/")
+            val isTv = o.optString("type").lowercase() == "tvshows" || href.contains("/tvshows/")
             val year = o.optString("year").toIntOrNull()
                 ?: Regex("(19|20)\\d{2}").find(title)?.value?.toIntOrNull()
 
@@ -162,17 +159,15 @@ class MoviesHDHub : MainAPI() {
     }
 
     // =====================================================================
-    // LOAD — selector verified từ HTML thực tế của /movies/rise-of-the-superheroes-2019/
+    // LOAD
     // =====================================================================
     override suspend fun load(url: String): LoadResponse {
         ClipboardLogger.logAndCopy("LOAD", "url=$url")
         val doc = app.get(url, headers = headers(url)).document
 
-        // Title: bỏ đuôi "-YYYY" mà site nối vào H1
         val rawTitle = doc.selectFirst(".sheader .data h1")?.text()?.trim().orEmpty()
         val title = rawTitle.replace(Regex("[-\\s]+\\(?(19|20)\\d{2}\\)?$"), "").trim()
 
-        // Poster: ưu tiên og:image (w780)
         val poster = (doc.selectFirst("meta[property=og:image]")?.attr("content")
             ?: doc.selectFirst(".sheader .poster img")?.attr("src"))
             ?.replace("w185", "w500")
@@ -225,16 +220,13 @@ class MoviesHDHub : MainAPI() {
                 val seasonNum = seC.selectFirst(".se-q .se-t, .se-q")?.text()
                     ?.let { Regex("(\\d+)").find(it)?.groupValues?.get(1)?.toIntOrNull() }
                     ?: (sIdx + 1)
-
                 seC.select(".se-a .episodios li").forEachIndexed { eIdx, li ->
                     val a = li.selectFirst(".episodiotitle a, a") ?: return@forEachIndexed
                     val epHref = fixUrl(a.attr("href"))
                     if (epHref.isBlank()) return@forEachIndexed
-
                     val epNum = li.selectFirst(".numerando")?.text()?.let {
                         Regex("(\\d+)\\s*$").find(it)?.groupValues?.get(1)?.toIntOrNull()
                     } ?: (eIdx + 1)
-
                     list.add(newEpisode(epHref) {
                         this.name = a.text().trim().ifBlank { "Episode $epNum" }
                         this.season = seasonNum
@@ -243,7 +235,6 @@ class MoviesHDHub : MainAPI() {
                 }
             }
         } else {
-            // Fallback: coi như 1 episode duy nhất trỏ về chính URL
             list.add(newEpisode(baseUrl) {
                 this.name = "Full"
                 this.season = 1
@@ -254,8 +245,7 @@ class MoviesHDHub : MainAPI() {
     }
 
     // =====================================================================
-    // LOAD LINKS — flow verified từ cURL capture
-    //  POST admin-ajax.php → embed URL → WebView sniff (WASM decrypt) → m3u8
+    // LOAD LINKS — POST admin-ajax → WebView sniff → m3u8/mp4
     // =====================================================================
     override suspend fun loadLinks(
         data: String,
@@ -263,36 +253,28 @@ class MoviesHDHub : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        ClipboardLogger.logAndCopy("=== NEW PLAY SESSION ===", "data=$data")
+        ClipboardLogger.logAndCopy("=== NEW PLAY ===", "data=$data")
         val doc = app.get(data, headers = headers(data)).document
 
-        // post_id: <meta id='dooplay-ajax-counter' data-postid='...'/>
         val postId = doc.selectFirst("meta#dooplay-ajax-counter")?.attr("data-postid").orEmpty()
             .ifBlank { doc.selectFirst("[data-postid]")?.attr("data-postid").orEmpty() }
             .ifBlank {
                 Regex("/movies?/([^/]+)/?$").find(data)?.groupValues?.get(1).orEmpty()
             }
 
-        // Danh sách server: <li class='dooplay_player_option' data-nume='N' data-type='movie'>
         val servers = doc.select("li.dooplay_player_option")
             .filter {
                 it.attr("data-nume").isNotEmpty() && it.attr("data-nume") != "trailer"
             }
 
-        ClipboardLogger.logAndCopy(
-            "LINKS", "postId=$postId | servers=${servers.size}"
-        )
-        if (servers.isEmpty()) {
-            ClipboardLogger.logAndCopy("LINKS", "no servers found")
-            return false
-        }
+        ClipboardLogger.logAndCopy("LINKS", "postId=$postId | servers=${servers.size}")
+        if (servers.isEmpty()) return false
 
         var emitted = false
         for (li in servers) {
             val nume = li.attr("data-nume")
             val label = li.selectFirst("span.title")?.text()?.trim() ?: "Server $nume"
             try {
-                // Bước 1: POST admin-ajax → embed URL
                 val embed = fetchEmbedUrl(postId, nume, data)
                 if (embed.isNullOrBlank()) {
                     ClipboardLogger.logAndCopy("SERVER-$nume", "no embed url")
@@ -300,24 +282,22 @@ class MoviesHDHub : MainAPI() {
                 }
                 ClipboardLogger.logAndCopy("SERVER-$nume", "embed=$embed")
 
-                // Bước 2: WebView sniff — chạy WASM, bắt m3u8
                 val sniffed = WebViewSniffer.sniff(
                     url = embed,
                     referer = data,
                     headers = headers(embed),
-                    timeoutMs = 35_000L
+                    timeoutMs = 60_000L
                 )
                 ClipboardLogger.logAndCopy("SERVER-$nume", "sniffed=${sniffed.size}")
 
-                // Bước 3: emit
+                // ============== EMIT — chỉ dùng headers, KHÔNG dùng referer ==============
                 for (s in sniffed) {
                     if (s.url.contains(".m3u8", true)) {
                         try {
                             M3u8Helper.generateM3u8(
                                 source = "$name [$label]",
                                 streamUrl = s.url,
-                                referer = s.referer,
-                                headers = headers(s.referer)
+                                headers = streamHeaders(s.referer)
                             ).forEach {
                                 callback(it)
                                 emitted = true
@@ -326,16 +306,19 @@ class MoviesHDHub : MainAPI() {
                             ClipboardLogger.logAndCopy("M3U8", "fail: ${t.message}")
                         }
                     } else if (s.url.contains(".mp4", true)) {
-                        callback(newExtractorLink(
-                            source = "$name [$label]",
-                            name = "$name [$label] • MP4",
-                            url = s.url,
-                            type = ExtractorLinkType.VIDEO
-                        ) {
-                            this.referer = s.referer
-                            this.headers = headers(s.referer)
-                        })
-                        emitted = true
+                        try {
+                            callback(newExtractorLink(
+                                source = "$name [$label]",
+                                name = "$name [$label] • MP4",
+                                url = s.url,
+                                type = ExtractorLinkType.VIDEO
+                            ) {
+                                this.headers = streamHeaders(s.referer)
+                            })
+                            emitted = true
+                        } catch (t: Throwable) {
+                            ClipboardLogger.logAndCopy("MP4", "fail: ${t.message}")
+                        }
                     }
                 }
             } catch (t: Throwable) {
@@ -348,10 +331,7 @@ class MoviesHDHub : MainAPI() {
         return emitted
     }
 
-    /**
-     * Body chính xác theo capture (40 bytes cho post=66611&nume=1):
-     *   action=doo_player_ajax&post=<id>&nume=<n>
-     */
+    /** Body chính xác 40B theo cURL: action=doo_player_ajax&post=X&nume=Y */
     private suspend fun fetchEmbedUrl(
         postId: String,
         nume: String,
@@ -374,7 +354,6 @@ class MoviesHDHub : MainAPI() {
         }
         ClipboardLogger.logAndCopy("AJAX-$nume", "resp=$raw")
 
-        // 1) Parse JSON
         val json = try { JSONObject(raw) } catch (_: Throwable) { null }
         if (json != null) {
             for (k in listOf("embed", "url", "src", "iframe", "link", "embed_url", "data")) {
@@ -382,19 +361,14 @@ class MoviesHDHub : MainAPI() {
                 if (v.startsWith("http")) return v
             }
         }
-
-        // 2) Regex URL
         Regex("""https?://[^\s"'<>\\]+""").find(raw)?.value?.let { if (it.isNotBlank()) return it }
-
-        // 3) Toàn bộ raw là URL
         val trim = raw.trim().trim('"')
         if (trim.startsWith("http")) return trim
-
         return null
     }
 
     // =====================================================================
-    // TMDB helper — optional, dùng cho enrichment sau này
+    // TMDB helper
     // =====================================================================
     suspend fun getTmdbId(title: String, year: Int?, isTv: Boolean): String? {
         return try {
