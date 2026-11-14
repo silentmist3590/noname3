@@ -2,6 +2,7 @@ include(":SuperembedProvider")
 include(":Movieuniverse")
 include(":MoviesPro")
 include(":Vidnest")
+include(":Cinezo")
 
 
 pluginManagement {
