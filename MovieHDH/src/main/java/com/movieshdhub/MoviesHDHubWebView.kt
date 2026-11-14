@@ -127,6 +127,7 @@ object WebViewSniffer {
                                 val ref = lastPageUrl[0]
                                 if (results.putIfAbsent(u, SniffResult(u, ref)) == null) {
                                     ClipboardLogger.logAndCopy("SNIFF", "hit=${u}")
+                                    // Nếu đã bắt được m3u8, chờ 2s rồi đóng để lấy các segment
                                     if (results.size >= 2) scheduleFinish(2000)
                                     else scheduleFinish(5000)
                                 }
@@ -186,19 +187,15 @@ object WebViewSniffer {
     private fun sortResults(list: List<SniffResult>): List<SniffResult> =
         list.sortedWith(compareBy({ if (it.url.contains(".m3u8", true)) 0 else 1 }))
 
+    // Hàm isMediaUrl đã được thắt chặt: CHỈ BẮT .m3u8 VÀ .mp4
     private fun isMediaUrl(u: String): Boolean {
         val l = u.lowercase()
         if (AD_DOMAINS.any { l.contains(it) }) return false
         
-        // Bỏ qua các file segment
         val segmentPattern = Regex(""".*\.(ts|m4s|key|aac|vtt|srt|jpg|png|webp|gif)(\?.*)?$""")
         if (segmentPattern.matches(l)) return false
         
-        // Chấp nhận m3u8, mp4
         if (l.contains(".m3u8") || l.contains(".mp4")) return true
-        
-        // Chấp nhận các link gateway, manifest, playlist đặc biệt
-        if (l.contains("/manifest") || l.contains("/playlist") || l.contains("/pl/") || l.contains("juniperandjade.space")) return true
         
         return false
     }
