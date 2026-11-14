@@ -30,6 +30,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.TextView
+import android.widget.Toast
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 import org.json.JSONObject
@@ -216,7 +217,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // WEBVIEW SNIFFER (TỐI ƯU HEADER VÀ IFRAME)
+    // WEBVIEW SNIFFER (TỐI ƯU CHO VIPSTREAM-A VÀ CHO PHÉP WEBVIEW TỰ PHÁT SERVER KHÁC)
     // =====================================================================================
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun sniffStream(
@@ -236,6 +237,7 @@ class SuperembedProvider : MainAPI() {
                     var finished = false
                     var isCaptchaActive = false
                     var retryCount = 0
+                    var autoClickEnabled = true // Biến điều khiển tự động click
                     val originalOrientation = ctx.resources.configuration.orientation
                     var firstStream: SniffResult? = null
                     var serverList: List<ServerInfo> = emptyList()
@@ -270,12 +272,17 @@ class SuperembedProvider : MainAPI() {
                     fun processFoundUrl(url: String, requestHeaders: Map<String, String>) {
                         if (firstStream != null || finished) return
                         
-                        // ⭐ LẤY 100% HEADER THỰC TẾ TỪ WEBVIEW ĐỂ TRUYỀN SANG EXOPLAYER
-                        val finalHeaders = requestHeaders.toMutableMap().apply {
-                            if (!containsKey("Referer")) put("Referer", "https://streamingnow.mov/")
-                            if (!containsKey("Origin")) put("Origin", "https://streamingnow.mov")
-                        }
+                        // ⭐ LẤY 100% HEADER GỐC ĐỂ FIX LỖI 2004
+                        val finalHeaders = mutableMapOf<String, String>()
+                        finalHeaders.putAll(requestHeaders)
                         
+                        val cookie = CookieManager.getInstance().getCookie("https://streamingnow.mov/")
+                        if (!cookie.isNullOrEmpty()) {
+                            finalHeaders["Cookie"] = cookie.replace("\n", "").trim()
+                        }
+                        finalHeaders["Referer"] = "https://streamingnow.mov/"
+                        finalHeaders["Origin"] = "https://streamingnow.mov"
+
                         firstStream = SniffResult(url, finalHeaders)
                         ClipboardLogger.logAndCopy("Sniff HIT", "Bắt link (kèm Header gốc): $url")
                         
@@ -301,7 +308,7 @@ class SuperembedProvider : MainAPI() {
                                 } catch (_: Exception) {}
                             }
                             
-                            // Đóng WebView lập tức để chuyển sang ExoPlayer
+                            // Đóng WebView ngay lập tức để chuyển sang ExoPlayer
                             handler.postDelayed({
                                 if (!finished) finish()
                             }, 200L)
@@ -321,6 +328,7 @@ class SuperembedProvider : MainAPI() {
                     }
                     wv.setBackgroundColor(Color.BLACK)
 
+                    // Cấu hình Chuột ảo
                     cursor.text = "➕"
                     cursor.textSize = 40f
                     cursor.setTextColor(Color.RED)
@@ -331,6 +339,9 @@ class SuperembedProvider : MainAPI() {
                     wv.requestFocus()
                     wv.setOnKeyListener { _, keyCode, event ->
                         if (event.action == KeyEvent.ACTION_DOWN) {
+                            // ⭐ KHI NGƯỜI DÙNG BẤM PHÍM, TẮT TỰ ĐỘNG CLICK
+                            autoClickEnabled = false
+                            
                             when (keyCode) {
                                 KeyEvent.KEYCODE_DPAD_UP -> { cy -= 40f; cursor.y = cy; true }
                                 KeyEvent.KEYCODE_DPAD_DOWN -> { cy += 40f; cursor.y = cy; true }
@@ -375,9 +386,8 @@ class SuperembedProvider : MainAPI() {
                             } else if (msg.startsWith("HOOK_VIDEO_URL:")) {
                                 val url = msg.removePrefix("HOOK_VIDEO_URL:").trim()
                                 if (url.startsWith("http") && !AD_DOMAINS.any { url.contains(it, true) }) {
-                                    ClipboardLogger.logAndCopy("JS Hook", "Bắt link từ video.src (streamov/blob): $url")
-                                    // JS Hook không có requestHeaders, ta lấy cookie hiện tại
-                                    val cookie = CookieManager.getInstance().getCookie(url) ?: ""
+                                    ClipboardLogger.logAndCopy("JS Hook", "Bắt link từ video.src: $url")
+                                    val cookie = CookieManager.getInstance().getCookie("https://streamingnow.mov/") ?: ""
                                     processFoundUrl(url, mapOf("Cookie" to cookie))
                                 }
                             }
@@ -387,7 +397,6 @@ class SuperembedProvider : MainAPI() {
 
                     wv.webViewClient = object : WebViewClient() {
                         override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                            // ⭐ JS ĐỆ QUY XUYÊN IFRAME (Dành cho các server ẩn link)
                             val js = """
                                 (function() {
                                     if (window.fetch) {
@@ -422,27 +431,15 @@ class SuperembedProvider : MainAPI() {
                                         origOpen.apply(this, arguments);
                                     };
 
-                                    // Quét video trong cả iframe (cùng domain)
                                     var checkVideo = setInterval(function() {
-                                        function findVideo(doc) {
-                                            var v = doc.querySelector('video');
-                                            if (v) return v;
-                                            var iframes = doc.querySelectorAll('iframe');
-                                            for (var i = 0; i < iframes.length; i++) {
-                                                try {
-                                                    var v2 = findVideo(iframes[i].contentDocument);
-                                                    if (v2) return v2;
-                                                } catch(e) {} // Cross-origin iframe
-                                            }
-                                            return null;
-                                        }
-                                        
-                                        var v = findVideo(document);
+                                        var v = document.querySelector('video');
                                         if (v && v.duration > 0) {
                                             if (v.src && v.src.startsWith('http')) {
                                                 console.log("HOOK_VIDEO_URL:" + v.src);
+                                                clearInterval(checkVideo);
                                             } else if (v.currentSrc && v.currentSrc.startsWith('http')) {
                                                 console.log("HOOK_VIDEO_URL:" + v.currentSrc);
+                                                clearInterval(checkVideo);
                                             }
                                         }
                                     }, 1000);
@@ -475,7 +472,6 @@ class SuperembedProvider : MainAPI() {
                             }
 
                             if (streamRegex.containsMatchIn(u) && !u.contains("/embed/iframe_player/")) {
-                                // ⭐ Truyền NGUYÊN XI headers của request này sang ExoPlayer
                                 val headers = request?.requestHeaders ?: emptyMap()
                                 processFoundUrl(u, headers)
                             }
@@ -513,7 +509,9 @@ class SuperembedProvider : MainAPI() {
                     val clickRunnable = object : Runnable {
                         override fun run() {
                             if (finished || firstStream != null) return
-                            if (!isCaptchaActive) {
+                            
+                            // ⭐ NẾU NGƯỜI DÙNG ĐÃ BẤM ĐIỀU KHIỂN, KHÔNG TỰ ĐỘNG CLICK NỮA
+                            if (autoClickEnabled && !isCaptchaActive) {
                                 try {
                                     wv.evaluateJavascript(
                                         "(function(){" +
@@ -670,7 +668,7 @@ class SuperembedProvider : MainAPI() {
             val (result, servers) = sniffStream(embedUrl, fakeReferer, seen)
 
             if (result == null) {
-                ClipboardLogger.logAndCopy("Error", "Không bắt được link chính.")
+                ClipboardLogger.logAndCopy("Error", "Không bắt được link chính. Có thể bạn đã chọn server khác để phát trên WebView.")
                 return false
             }
 
@@ -680,6 +678,7 @@ class SuperembedProvider : MainAPI() {
             val finalHeaders = result.headers.toMutableMap()
 
             if (result.url.contains(".m3u8")) {
+                // Sử dụng chính xác bộ header đã bắt được để vượt 2004
                 val qualities = M3u8Helper.generateM3u8(
                     source = this.name, 
                     streamUrl = result.url, 
