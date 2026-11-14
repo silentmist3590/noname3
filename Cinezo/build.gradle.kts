@@ -11,3 +11,4 @@ cloudstream {
     tvTypes = listOf("Movie", "TvSeries")
     iconUrl = "https://cinezo.live/favicon.ico"
 }
+android { namespace = "com.lagradost" }
