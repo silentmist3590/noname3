@@ -3,6 +3,7 @@ include(":Movieuniverse")
 include(":MoviesPro")
 include(":Vidnest")
 include(":Cinezo")
+include(":Vidfyi")
 
 
 pluginManagement {
