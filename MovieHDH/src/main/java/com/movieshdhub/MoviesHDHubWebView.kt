@@ -25,7 +25,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
-data class SniffResult(val url: String, val referer: String)
+// Đã thêm trường cookies vào data class
+data class SniffResult(val url: String, val referer: String, val cookies: String)
 
 object WebViewSniffer {
 
@@ -125,8 +126,13 @@ object WebViewSniffer {
                             val u = request?.url?.toString() ?: return null
                             if (isMediaUrl(u)) {
                                 val ref = lastPageUrl[0]
-                                if (results.putIfAbsent(u, SniffResult(u, ref)) == null) {
-                                    ClipboardLogger.logAndCopy("SNIFF", "hit=${u}")
+                                val cookies = try {
+                                    val host = android.net.Uri.parse(u).host ?: ""
+                                    CookieManager.getInstance().getCookie("https://$host/").orEmpty()
+                                } catch (_: Throwable) { "" }
+
+                                if (results.putIfAbsent(u, SniffResult(u, ref, cookies)) == null) {
+                                    ClipboardLogger.logAndCopy("SNIFF", "hit=${u.take(200)} | cookie=${cookies.take(60)}")
                                     if (results.size >= 2) scheduleFinish(2000)
                                     else scheduleFinish(5000)
                                 }
@@ -171,7 +177,7 @@ object WebViewSniffer {
                     try {
                         (activity.window.decorView as? ViewGroup)?.addView(overlay)
                     } catch (_: Throwable) {}
-                    
+
                     webView.loadUrl(url)
                     main.postDelayed({ cleanup() }, timeoutMs)
 
@@ -189,10 +195,10 @@ object WebViewSniffer {
     private fun isMediaUrl(u: String): Boolean {
         val l = u.lowercase()
         if (AD_DOMAINS.any { l.contains(it) }) return false
-        
+
         val segmentPattern = Regex(""".*\.(ts|m4s|key|aac|vtt|srt|jpg|png|webp|gif)(\?.*)?$""")
         if (segmentPattern.matches(l)) return false
-        
+
         if (l.contains(".m3u8") || l.contains(".mp4")) return true
         return false
     }
