@@ -10,7 +10,7 @@ cloudstream {
     language = "en"
     description = "MoviesHDHub - Watch FREE Movies Online HD"
     authors = listOf("TJ-Plugins")
-    version = 3
+    version = 4
     status = 1
     tvTypes = listOf("Movie", "TvSeries")
 }
