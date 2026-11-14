@@ -13,6 +13,7 @@ cloudstream {
     version = 3
     status = 1
     tvTypes = listOf("Movie", "TvSeries")
+    apiName = "MoviesHDHub"
 }
 
 android {
