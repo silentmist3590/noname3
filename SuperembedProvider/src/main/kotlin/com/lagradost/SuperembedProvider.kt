@@ -216,7 +216,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // WEBVIEW SNIFFER (ĐÃ NÂNG CẤP VỚI MOTION EVENT)
+    // WEBVIEW SNIFFER (BẮT LINK TỪ NETWORK + JS VIDEO.SRC + HEADER ĐẦY ĐỦ)
     // =====================================================================================
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun sniffStream(
@@ -272,6 +272,7 @@ class SuperembedProvider : MainAPI() {
                     fun processFoundUrl(url: String, headers: Map<String, String>) {
                         if (firstStream != null || finished) return
                         
+                        // Lấy Cookie từ WebView để đính kèm
                         val cookie = CookieManager.getInstance().getCookie(url) ?: ""
                         val finalHeaders = headers.toMutableMap().apply {
                             if (cookie.isNotEmpty()) put("Cookie", cookie)
@@ -302,6 +303,7 @@ class SuperembedProvider : MainAPI() {
                                 } catch (_: Exception) {}
                             }
                             
+                            // Đóng WebView sau 300ms để kịp lấy server list
                             handler.postDelayed({
                                 if (!finished) finish()
                             }, 300L)
@@ -318,6 +320,7 @@ class SuperembedProvider : MainAPI() {
                         setSupportMultipleWindows(true)
                         mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                         cacheMode = WebSettings.LOAD_NO_CACHE
+                        // Không set UA giả để tránh Cloudflare phát hiện
                     }
                     wv.setBackgroundColor(Color.BLACK)
 
@@ -338,7 +341,6 @@ class SuperembedProvider : MainAPI() {
                                 KeyEvent.KEYCODE_DPAD_LEFT -> { cx -= 40f; cursor.x = cx; true }
                                 KeyEvent.KEYCODE_DPAD_RIGHT -> { cx += 40f; cursor.x = cx; true }
                                 KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
-                                    // ⭐ GỌI HÀM MOTION EVENT KHI BẤM NÚT OK
                                     sendRealMotionEvent(wv, cx + 20f, cy + 20f, handler)
                                     true
                                 }
@@ -375,9 +377,10 @@ class SuperembedProvider : MainAPI() {
                                 isCaptchaActive = false
                                 ClipboardLogger.logAndCopy("Captcha", "Đã giải xong.")
                             } else if (msg.startsWith("HOOK_VIDEO_URL:")) {
+                                // Bắt link từ video.src (dành cho blob/iframe)
                                 val url = msg.removePrefix("HOOK_VIDEO_URL:").trim()
                                 if (url.startsWith("http") && !AD_DOMAINS.any { url.contains(it, true) }) {
-                                    ClipboardLogger.logAndCopy("JS Hook", "Phát hiện link: $url")
+                                    ClipboardLogger.logAndCopy("JS Video Src", "Phát hiện link từ thẻ video: $url")
                                     val headers = mapOf(
                                         "Referer" to "https://streamingnow.mov/",
                                         "Origin" to "https://streamingnow.mov",
@@ -426,12 +429,19 @@ class SuperembedProvider : MainAPI() {
                                         origOpen.apply(this, arguments);
                                     };
 
+                                    // Theo dõi thẻ video để bắt link (kể cả blob)
                                     var checkVideo = setInterval(function() {
                                         var v = document.querySelector('video');
                                         if (v && v.duration > 0) {
                                             if (v.src && v.src.startsWith('http')) {
                                                 console.log("HOOK_VIDEO_URL:" + v.src);
                                                 clearInterval(checkVideo);
+                                            } else if (v.src && v.src.startsWith('blob:')) {
+                                                // Nếu là blob, thử lấy từ currentSrc
+                                                if (v.currentSrc && v.currentSrc.startsWith('http')) {
+                                                    console.log("HOOK_VIDEO_URL:" + v.currentSrc);
+                                                    clearInterval(checkVideo);
+                                                }
                                             }
                                         }
                                     }, 1000);
@@ -505,7 +515,6 @@ class SuperembedProvider : MainAPI() {
                             if (finished || firstStream != null) return
                             if (!isCaptchaActive) {
                                 try {
-                                    // ⭐ KẾT HỢP JS CLICK VÀ MOTION EVENT
                                     wv.evaluateJavascript(
                                         "(function(){" +
                                         "var els=document.querySelectorAll('button,div,span,a,video');" +
@@ -517,7 +526,6 @@ class SuperembedProvider : MainAPI() {
                                         "}" +
                                         "})()", null
                                     )
-                                    // Gửi thêm MotionEvent để đánh lừa player
                                     sendRealMotionEvent(wv, 540f, 960f, handler)
                                 } catch (_: Exception) {}
                             }
@@ -536,18 +544,15 @@ class SuperembedProvider : MainAPI() {
         }
     }
 
-    // ⭐ SỬ DỤNG MOTION EVENT (GIỐNG PLUGIN VIDSRCSU CŨ)
     private fun sendRealMotionEvent(wv: WebView, x: Float, y: Float, handler: Handler) {
         try {
             val downTime = SystemClock.uptimeMillis()
             
-            // ACTION_DOWN
             val down = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 0)
             down.source = InputDevice.SOURCE_TOUCHSCREEN
             wv.dispatchTouchEvent(down)
             down.recycle()
 
-            // ACTION_UP
             handler.postDelayed({
                 val upTime = SystemClock.uptimeMillis()
                 val up = MotionEvent.obtain(downTime, upTime, MotionEvent.ACTION_UP, x, y, 0)
@@ -576,7 +581,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // LẤY LINK TỪ CÁC SERVER PHỤ
+    // LẤY LINK TỪ CÁC SERVER PHỤ (VỚI HEADER ĐẦY ĐỦ)
     // =====================================================================================
     private suspend fun extractSpecificServers(
         servers: List<ServerInfo>,
@@ -609,7 +614,11 @@ class SuperembedProvider : MainAPI() {
                     callback(newExtractorLink(this.name, "MultiEmbed ${server.name}", m3u8, ExtractorLinkType.M3U8) {
                         this.referer = playerReferer
                         this.quality = Qualities.Unknown.value
-                        this.headers = mapOf("Referer" to playerReferer, "Cookie" to cookie)
+                        this.headers = mapOf(
+                            "Referer" to playerReferer, 
+                            "Origin" to playerReferer,
+                            "Cookie" to cookie
+                        )
                     })
                     ClipboardLogger.logAndCopy("ExtraServer Success", "${server.name}: $m3u8")
                 } else {
@@ -627,7 +636,7 @@ class SuperembedProvider : MainAPI() {
     }
 
     // =====================================================================================
-    // LOAD LINKS
+    // LOAD LINKS (XỬ LÝ LỖI 2004 BẰNG M3U8HELPER + HEADER)
     // =====================================================================================
     override suspend fun loadLinks(
         data: String, isCasting: Boolean,
@@ -668,26 +677,40 @@ class SuperembedProvider : MainAPI() {
             val playerReferer = "https://streamingnow.mov/"
             val cookie = CookieManager.getInstance().getCookie(result.url) ?: ""
             
+            // ⭐ BỘ HEADER ĐẦY ĐỦ ĐỂ VƯỢT 403
             val finalHeaders = result.headers.toMutableMap().apply {
                 put("Referer", playerReferer)
                 put("Origin", "https://streamingnow.mov")
                 if (cookie.isNotEmpty()) put("Cookie", cookie)
+                // Thêm sec-ch-ua để vượt Cloudflare nếu cần
+                put("sec-ch-ua", "\"Not-A.Brand\";v=\"99\", \"Google Chrome\";v=\"157\", \"Chromium\";v=\"157\"")
+                put("sec-ch-ua-mobile", "?0")
+                put("sec-ch-ua-platform", "\"Windows\"")
             }
 
             if (result.url.contains(".m3u8")) {
+                // ⭐ DÙNG M3U8HELPER ĐỂ TẢI LẠI MANIFEST VỚI HEADER ĐẦY ĐỦ
                 val qualities = M3u8Helper.generateM3u8(
-                    source = this.name, streamUrl = result.url, referer = playerReferer, headers = finalHeaders
+                    source = this.name, 
+                    streamUrl = result.url, 
+                    referer = playerReferer, 
+                    headers = finalHeaders
                 )
                 if (qualities.isNotEmpty()) {
                     qualities.forEach { callback.invoke(it) }
                 } else {
+                    // Nếu vẫn fail, phát link thô với header
                     callback(newExtractorLink(this.name, "MultiEmbed (Primary)", result.url, ExtractorLinkType.M3U8) {
-                        this.referer = playerReferer; this.quality = Qualities.P1080.value; this.headers = finalHeaders
+                        this.referer = playerReferer
+                        this.quality = Qualities.P1080.value
+                        this.headers = finalHeaders
                     })
                 }
             } else {
                 callback(newExtractorLink(this.name, "MultiEmbed (Primary)", result.url, ExtractorLinkType.VIDEO) {
-                    this.referer = playerReferer; this.quality = Qualities.Unknown.value; this.headers = finalHeaders
+                    this.referer = playerReferer
+                    this.quality = Qualities.Unknown.value
+                    this.headers = finalHeaders
                 })
             }
 
