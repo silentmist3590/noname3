@@ -2,7 +2,7 @@ cloudstream {
     description = "MoviesPro provider with stage-by-stage accumulated clipboard diagnostics"
     authors = listOf("OpenAI")
     status = 1
-    version = 2
+    version = 3
     tvTypes = listOf("Movie", "TvSeries")
     requiresResources = false
 }
