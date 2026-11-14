@@ -41,7 +41,6 @@ class MoviesHDHub : MainAPI() {
         "Accept-Language" to "en-US,en;q=0.9"
     )
 
-    /** Headers đầy đủ để pass qua server kiểm tra khắt khe */
     private fun streamHeaders(referer: String, cookies: String = ""): Map<String, String> {
         val base = mutableMapOf(
             "User-Agent" to UA,
@@ -59,9 +58,6 @@ class MoviesHDHub : MainAPI() {
         return base
     }
 
-    // =====================================================================
-    // HOME
-    // =====================================================================
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         ClipboardLogger.reset()
         val base = request.data.ifBlank { mainUrl }
@@ -78,9 +74,6 @@ class MoviesHDHub : MainAPI() {
         return newHomePageResponse(request.name, items, false)
     }
 
-    // =====================================================================
-    // SEARCH
-    // =====================================================================
     override suspend fun search(query: String): List<SearchResponse> {
         ClipboardLogger.logAndCopy("SEARCH", "query=$query")
         val url = "$mainUrl/?s=${URLEncoder.encode(query, "UTF-8")}"
@@ -132,9 +125,6 @@ class MoviesHDHub : MainAPI() {
         }
     }
 
-    // =====================================================================
-    // LOAD
-    // =====================================================================
     override suspend fun load(url: String): LoadResponse {
         ClipboardLogger.logAndCopy("LOAD", "url=$url")
         val doc = app.get(url, headers = headers(url)).document
@@ -161,9 +151,7 @@ class MoviesHDHub : MainAPI() {
                 || doc.selectFirst("#seasons, .single-tvshows") != null
                 || doc.selectFirst(".tvshows .se-c") != null
 
-        ClipboardLogger.logAndCopy(
-            "LOAD", "title=$title | year=$year | dur=$duration | series=$isSeries"
-        )
+        ClipboardLogger.logAndCopy("LOAD", "title=$title | year=$year | dur=$duration | series=$isSeries")
 
         return if (isSeries) {
             val eps = parseEpisodes(doc, url)
@@ -217,9 +205,6 @@ class MoviesHDHub : MainAPI() {
         return list
     }
 
-    // =====================================================================
-    // LOAD LINKS
-    // =====================================================================
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -231,14 +216,10 @@ class MoviesHDHub : MainAPI() {
 
         val postId = doc.selectFirst("meta#dooplay-ajax-counter")?.attr("data-postid").orEmpty()
             .ifBlank { doc.selectFirst("[data-postid]")?.attr("data-postid").orEmpty() }
-            .ifBlank {
-                Regex("/movies?/([^/]+)/?$").find(data)?.groupValues?.get(1).orEmpty()
-            }
+            .ifBlank { Regex("/movies?/([^/]+)/?$").find(data)?.groupValues?.get(1).orEmpty() }
 
         val servers = doc.select("li.dooplay_player_option")
-            .filter {
-                it.attr("data-nume").isNotEmpty() && it.attr("data-nume") != "trailer"
-            }
+            .filter { it.attr("data-nume").isNotEmpty() && it.attr("data-nume") != "trailer" }
 
         ClipboardLogger.logAndCopy("LINKS", "postId=$postId | servers=${servers.size}")
         if (servers.isEmpty()) return false
@@ -256,7 +237,6 @@ class MoviesHDHub : MainAPI() {
                 }
                 ClipboardLogger.logAndCopy("SERVER-$nume", "embed=$embed")
 
-                // Truyền referer vào để WebView lưu Cookie đúng domain
                 val sniffed = WebViewSniffer.sniff(
                     url = embed,
                     referer = data,
@@ -265,7 +245,6 @@ class MoviesHDHub : MainAPI() {
                 )
                 ClipboardLogger.logAndCopy("SERVER-$nume", "sniffed=${sniffed.size}")
 
-                // Chọn link tốt nhất: ưu tiên master.m3u8
                 val target = sniffed.firstOrNull { it.url.contains("/master.m3u8") }
                     ?: sniffed.firstOrNull { it.url.contains(".m3u8", true) }
                     ?: sniffed.firstOrNull { it.url.contains(".mp4", true) }
@@ -275,7 +254,6 @@ class MoviesHDHub : MainAPI() {
                     continue
                 }
 
-                // Xác định Referer theo domain
                 val domainRef = when {
                     target.url.contains("juniperandjade.space") -> "https://juniperandjade.space/"
                     target.url.contains("vaplayer") -> "https://streamdata.vaplayer.ru/"
@@ -285,20 +263,13 @@ class MoviesHDHub : MainAPI() {
 
                 val hdrs = streamHeaders(domainRef, target.cookies)
 
-                ClipboardLogger.logAndCopy(
-                    "TARGET",
-                    "url=${target.url.take(200)} | cookies=${target.cookies.take(100)}"
-                )
+                ClipboardLogger.logAndCopy("TARGET", "url=${target.url.take(200)} | cookies=${target.cookies.take(100)}")
 
                 // === TEST THỬ URL TRƯỚC KHI EMIT ===
                 try {
                     val test = app.get(target.url, headers = hdrs)
-                    ClipboardLogger.logAndCopy(
-                        "TEST", "code=${test.code} len=${test.text.length}"
-                    )
-                    ClipboardLogger.logAndCopy(
-                        "TEST", "head=${test.text.take(300).replace("\n", "\\n")}"
-                    )
+                    ClipboardLogger.logAndCopy("TEST", "code=${test.code} len=${test.text.length}")
+                    ClipboardLogger.logAndCopy("TEST", "head=${test.text.take(300).replace("\n", "\\n")}")
                     if (test.code !in 200..299) {
                         ClipboardLogger.logAndCopy("TEST", "REJECTED - skip this URL")
                         continue
@@ -307,7 +278,7 @@ class MoviesHDHub : MainAPI() {
                     ClipboardLogger.logAndCopy("TEST", "fail: ${e.message}")
                 }
 
-                // === EMIT 1: LINK M3U8 TRỰC TIẾP (chuẩn nhất) ===
+                // === EMIT 1: LINK M3U8 TRỰC TIẾP ===
                 try {
                     callback(newExtractorLink(
                         source = "$name [$label]",
@@ -325,7 +296,7 @@ class MoviesHDHub : MainAPI() {
                     ClipboardLogger.logAndCopy("EMIT-RAW", "fail: ${t.message}")
                 }
 
-                // === EMIT 2: M3U8HELPER (bổ sung variant nếu có) ===
+                // === EMIT 2: M3U8HELPER ===
                 if (target.url.contains(".m3u8")) {
                     try {
                         val generated = M3u8Helper.generateM3u8(
@@ -351,9 +322,6 @@ class MoviesHDHub : MainAPI() {
         return emitted
     }
 
-    // =====================================================================
-    // FETCH EMBED URL
-    // =====================================================================
     private suspend fun fetchEmbedUrl(postId: String, nume: String, type: String, referer: String): String? {
         try {
             val formData = mapOf(
