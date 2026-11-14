@@ -1,43 +1,66 @@
-package com.lagradost
+package com.movieuniverse
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 
-/** Accumulates diagnostics for the current operation and copies the whole buffer after each stage. */
-object MoviesProClipboardLogger {
-    private const val TAG = "MoviesProDiag"
-    private const val LIMIT = 55_000
+object ClipboardLogger {
+    private const val TAG = "PluginLogger"
+    private const val MAX_CHARS = 60_000
+
+    /** true = luôn copy log vào clipboard; false = chỉ copy khi tiêu đề chứa "Error"/"Exception". */
+    private const val COPY_ALWAYS = true
+
     private val buffer = StringBuilder()
 
-    @Synchronized fun reset(label: String = "session") {
-        buffer.setLength(0)
-        appendLocked("SESSION", label)
-    }
-
-    fun stage(stage: String, message: String) = append(stage, message, false)
-    fun error(stage: String, message: String, throwable: Throwable? = null) {
-        append("ERROR/$stage", message + (throwable?.let { "\n${it.javaClass.simpleName}: ${it.message}\n${it.stackTraceToString().take(2500)}" } ?: ""), true)
+    /** Lấy Context mà không phụ thuộc lớp CloudStreamApp/AcraApplication (tên đổi theo phiên bản app). */
+    fun appContext(): Context? {
+        try {
+            val at = Class.forName("android.app.ActivityThread")
+            val app = at.getMethod("currentApplication").invoke(null) as? Context
+            if (app != null) return app
+        } catch (_: Throwable) {
+        }
+        for (cls in listOf("com.lagradost.cloudstream3.CloudStreamApp", "com.lagradost.cloudstream3.AcraApplication")) {
+            try {
+                val c = Class.forName(cls)
+                val comp = c.getField("Companion").get(null)
+                val ctx = comp.javaClass.getMethod("getContext").invoke(comp) as? Context
+                if (ctx != null) return ctx
+            } catch (_: Throwable) {
+            }
+        }
+        return null
     }
 
     @Synchronized
-    private fun append(stage: String, message: String, isError: Boolean) {
-        val safe = redact(message).take(9000)
-        appendLocked(stage, safe)
+    fun reset() {
+        buffer.setLength(0)
+    }
 
-        if (isError) {
-            Log.e(TAG, "[$stage] $safe")
-        } else {
-            Log.d(TAG, "[$stage] $safe")
+    @Synchronized
+    fun logAndCopy(title: String, message: String) {
+        val entry = "=== [$title] ===\n$message\n"
+        Log.d(TAG, entry)
+        buffer.append(entry).append('\n')
+        if (buffer.length > MAX_CHARS) buffer.delete(0, buffer.length - MAX_CHARS)
+        if (!COPY_ALWAYS && !title.contains("Error", true) && !title.contains("Exception", true)) return
+        val text = buffer.toString()
+        try {
+            val context = appContext() ?: return
+            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            Handler(Looper.getMainLooper()).post {
+                try {
+                    clipboard.setPrimaryClip(ClipData.newPlainText("Plugin Log", text))
+                } catch (e: Throwable) {
+                    Log.e(TAG, "Failed to copy to clipboard", e)
+                }
+            }
+        } catch (e: Throwable) {
+            Log.e(TAG, "Failed to copy to clipboard", e)
         }
     }
-
-    private fun appendLocked(stage: String, message: String) {
-        buffer.append("\n--- [").append(stage).append("] ---\n").append(message).append('\n')
-        if (buffer.length > LIMIT) buffer.delete(0, buffer.length - LIMIT)
-    }
-
-    private fun redact(s: String): String = s
-        .replace(Regex("(?i)(token|key|signature|sig|auth|authorization|cookie)=([^&\\s]+)"), "$1=<redacted>")
-        .replace(Regex("(?i)(Bearer\\s+)[A-Za-z0-9._~-]+"), "$1<redacted>")
-
-    
 }
