@@ -8,10 +8,9 @@ cloudstream {
     language = "en"
     description = "MoviesHDHub - Watch FREE Movies Online HD"
     authors = listOf("TJ-Plugins")
-    version = 3
+    version = 2
     status = 1
     tvTypes = listOf("Movie", "TvSeries")
-    // iconUrl không bắt buộc — bỏ để tránh lỗi filter
 }
 
 android {
@@ -20,24 +19,20 @@ android {
 
     defaultConfig {
         minSdk = 21
-        // targetSdk KHÔNG khai báo trong library — AGP 8 deprecate rồi
     }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+}
 
-    // Kotlin compilerOptions DSL mới (thay cho kotlinOptions.jvmTarget)
-    kotlin {
-        compilerOptions {
-            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
-        }
-    }
+// Tự động đồng bộ JVM Target cho cả Java và Kotlin
+kotlin {
+    jvmToolchain(17)
 }
 
 dependencies {
-    // BẮT BUỘC: compileOnly cho CloudStream core
     compileOnly("com.github.recloudstream:cloudstream:-SNAPSHOT")
     implementation("org.jsoup:jsoup:1.17.2")
 }
