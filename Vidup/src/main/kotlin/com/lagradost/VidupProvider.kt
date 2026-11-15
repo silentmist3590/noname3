@@ -21,8 +21,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
@@ -47,7 +45,7 @@ class VidupProvider : MainAPI() {
     companion object {
         // Có thể dán sẵn API Key SubDL miễn phí (lấy tại https://subdl.com/panel/api)
         // Hoặc nhập trực tiếp trong mục Cài đặt Plugin (biểu tượng bánh răng) trên CloudStream
-        private const val DEFAULT_SUBDL_API_KEY = "xHeOWlCfS9o4EKmK7OwbeOBIhfbIHr2Y"
+        private const val DEFAULT_SUBDL_API_KEY = ""
     }
 
     // User-Agent Chrome chuẩn (tránh Cloudflare block Headless và vượt check Chrome của player)
@@ -414,36 +412,41 @@ class VidupProvider : MainAPI() {
         urlStr: String,
         headers: Map<String, String> = emptyMap(),
         timeoutMs: Int = 12_000
-    ): ByteArray? = withContext(Dispatchers.IO) {
-        var current = urlStr
-        for (hop in 0..3) {
-            var conn: HttpURLConnection? = null
-            try {
-                conn = (URL(current).openConnection() as HttpURLConnection).apply {
-                    instanceFollowRedirects = false
-                    connectTimeout = timeoutMs
-                    readTimeout = timeoutMs
-                    requestMethod = "GET"
-                    setRequestProperty("User-Agent", ua)
-                    headers.forEach { (k, v) -> setRequestProperty(k, v) }
-                }
-                val code = conn.responseCode
-                if (code in 300..399) {
-                    val loc = conn.getHeaderField("Location")?.trim()
-                    if (!loc.isNullOrBlank()) {
-                        current = if (loc.startsWith("http", ignoreCase = true)) loc else URL(URL(current), loc).toString()
-                        continue
+    ): ByteArray? = suspendCoroutine { cont ->
+        Thread {
+            var result: ByteArray? = null
+            var current = urlStr
+            for (hop in 0..3) {
+                var conn: HttpURLConnection? = null
+                try {
+                    conn = (URL(current).openConnection() as HttpURLConnection).apply {
+                        instanceFollowRedirects = false
+                        connectTimeout = timeoutMs
+                        readTimeout = timeoutMs
+                        requestMethod = "GET"
+                        setRequestProperty("User-Agent", ua)
+                        headers.forEach { (k, v) -> setRequestProperty(k, v) }
                     }
+                    val code = conn.responseCode
+                    if (code in 300..399) {
+                        val loc = conn.getHeaderField("Location")?.trim()
+                        if (!loc.isNullOrBlank()) {
+                            current = if (loc.startsWith("http", ignoreCase = true)) loc else URL(URL(current), loc).toString()
+                            continue
+                        }
+                    }
+                    if (code in 200..299) {
+                        result = conn.inputStream.use { it.readBytes() }
+                    }
+                    break
+                } catch (_: Exception) {
+                    break
+                } finally {
+                    conn?.disconnect()
                 }
-                if (code !in 200..299) return@withContext null
-                return@withContext conn.inputStream.use { it.readBytes() }
-            } catch (_: Exception) {
-                return@withContext null
-            } finally {
-                conn?.disconnect()
             }
-        }
-        null
+            cont.resume(result)
+        }.start()
     }
 
     private fun isZipBytes(bytes: ByteArray): Boolean =
@@ -503,6 +506,7 @@ class VidupProvider : MainAPI() {
         }
         if (collected.isEmpty()) return null
 
+        // Sắp xếp ưu tiên đúng tập (với TV Series) + ưu tiên .srt -> .vtt -> .ass/.ssa
         val best = collected.sortedWith(
             compareBy<Pair<String, ByteArray>>(
                 { if (ref.type == "tv" && !matchesEpisodeHint(it.first, ref.season, ref.episode)) 1 else 0 },
@@ -536,6 +540,7 @@ class VidupProvider : MainAPI() {
             (if (cand.releaseHint.isNotBlank()) " (${cand.releaseHint.take(28)})" else "")
 
         if (cand.isZip) {
+            // SubDL luôn trả về .zip -> bắt buộc tải & giải nén thành .srt/.vtt cục bộ để phát được
             val targetDir = subDir ?: return null
             val hdrs = mapOf("Referer" to "https://subdl.com/", "Accept" to "*/*")
             val bytes = httpDownloadBytes(cand.url, hdrs, timeoutMs = 15_000) ?: return null
@@ -715,6 +720,7 @@ class VidupProvider : MainAPI() {
                 }
             }
 
+            // Ưu tiên bản không Hearing Impaired trước
             val sortedVi = viItems.sortedBy { if (it.optBoolean("hi", false)) 1 else 0 }.take(3)
             val sortedEn = enItems.sortedBy { if (it.optBoolean("hi", false)) 1 else 0 }.take(3)
 
@@ -768,6 +774,7 @@ class VidupProvider : MainAPI() {
             )
         }
 
+        // Gọi song song OpenSubtitles REST, OpenSubtitles V3 & SubDL API
         val sourcesResults = listOf(0, 1, 2).amap { idx ->
             when (idx) {
                 0 -> queryOpenSubtitlesRest(ref, imdbId)
@@ -776,6 +783,9 @@ class VidupProvider : MainAPI() {
             }
         }.flatten()
 
+        // Tải về thư mục cục bộ:
+        // - SubDL (.zip): tải & giải nén toàn bộ ứng viên đã chọn (bắt buộc để ExoPlayer đọc được)
+        // - OpenSubtitles: tải tối đa 2 bản/ngôn ngữ về máy nếu autoDownload=true, các bản còn lại giữ URL trực tiếp
         val seenUrls = HashSet<String>()
         val candidates = sourcesResults.filter { seenUrls.add(it.url) }
 
