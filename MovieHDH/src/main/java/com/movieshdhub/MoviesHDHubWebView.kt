@@ -103,30 +103,23 @@ object WebViewSniffer {
                     CookieManager.getInstance().setAcceptCookie(true)
                     CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
 
-                    overlay.addView(webView, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+                    overlay.addView(
+                        webView,
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT
+                    )
                     overlay.addView(spinner)
 
                     fun cleanup() {
                         if (!done.compareAndSet(false, true)) return
-                        // Refresh lại cookie cho tất cả URL trước khi trả về
-                        val finalResults = results.values.map { r ->
-                            try {
-                                val freshJar = CookieManager.getInstance()
-                                    .getCookie(r.url).orEmpty()
-                                val merged = listOf(r.cookies, freshJar)
-                                    .filter { it.isNotBlank() }
-                                    .distinct()
-                                    .joinToString("; ")
-                                r.copy(cookies = merged)
-                            } catch (_: Throwable) { r }
-                        }
+                        try { CookieManager.getInstance().flush() } catch (_: Throwable) {}
                         main.post {
                             try { overlay.removeAllViews() } catch (_: Throwable) {}
                             try { (overlay.parent as? ViewGroup)?.removeView(overlay) } catch (_: Throwable) {}
                             try { webView.stopLoading() } catch (_: Throwable) {}
                             try { webView.loadUrl("about:blank") } catch (_: Throwable) {}
                             try { webView.destroy() } catch (_: Throwable) {}
-                            finish(sortResults(finalResults))
+                            finish(sortResults(results.values.toList()))
                         }
                     }
 
@@ -142,32 +135,32 @@ object WebViewSniffer {
                             val u = request?.url?.toString() ?: return null
                             if (isMediaUrl(u)) {
                                 val ref = lastPageUrl[0]
-                                val reqHdrs = try {
+                                val reqHdrs: Map<String, String> = try {
                                     request.requestHeaders ?: emptyMap()
                                 } catch (_: Throwable) { emptyMap() }
 
-                                // Lấy cookie từ chính header của request (chính xác nhất)
-                                val cookieFromReq = reqHdrs["Cookie"]
-                                    ?: reqHdrs["cookie"]
-                                    ?: ""
+                                val cookieFromReq = reqHdrs.entries
+                                    .firstOrNull { it.key.equals("Cookie", true) }
+                                    ?.value ?: ""
                                 val cookieFromJar = try {
                                     CookieManager.getInstance().getCookie(u).orEmpty()
                                 } catch (_: Throwable) { "" }
 
-                                val cookies = if (cookieFromReq.isNotBlank()) {
-                                    if (cookieFromJar.isNotBlank() && !cookieFromJar.contains(cookieFromReq)) {
+                                val mergedCookie = when {
+                                    cookieFromReq.isNotBlank() && cookieFromJar.isNotBlank() ->
                                         "$cookieFromReq; $cookieFromJar"
-                                    } else cookieFromReq
-                                } else cookieFromJar
+                                    cookieFromReq.isNotBlank() -> cookieFromReq
+                                    else -> cookieFromJar
+                                }
 
                                 if (results.putIfAbsent(
                                         u,
-                                        SniffResult(u, ref, cookies, reqHdrs)
+                                        SniffResult(u, ref, mergedCookie, reqHdrs)
                                     ) == null
                                 ) {
                                     ClipboardLogger.logAndCopy(
                                         "SNIFF",
-                                        "hit=${u.take(180)} | cookie.len=${cookies.length}"
+                                        "hit=${u.take(180)} | hdrs=${reqHdrs.keys.joinToString(",")} | cookie.len=${mergedCookie.length}"
                                     )
                                     if (results.size >= 2) scheduleFinish(3500)
                                     else scheduleFinish(6000)
@@ -201,11 +194,21 @@ object WebViewSniffer {
                     webView.setOnKeyListener { _, keyCode, event ->
                         if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
                         when (keyCode) {
-                            KeyEvent.KEYCODE_DPAD_UP -> { webView.evaluateJavascript("__dpadMove(0,-25)", null); true }
-                            KeyEvent.KEYCODE_DPAD_DOWN -> { webView.evaluateJavascript("__dpadMove(0, 25)", null); true }
-                            KeyEvent.KEYCODE_DPAD_LEFT -> { webView.evaluateJavascript("__dpadMove(-25,0)", null); true }
-                            KeyEvent.KEYCODE_DPAD_RIGHT -> { webView.evaluateJavascript("__dpadMove( 25,0)", null); true }
-                            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> { webView.evaluateJavascript("__dpadClick()", null); true }
+                            KeyEvent.KEYCODE_DPAD_UP -> {
+                                webView.evaluateJavascript("__dpadMove(0,-25)", null); true
+                            }
+                            KeyEvent.KEYCODE_DPAD_DOWN -> {
+                                webView.evaluateJavascript("__dpadMove(0, 25)", null); true
+                            }
+                            KeyEvent.KEYCODE_DPAD_LEFT -> {
+                                webView.evaluateJavascript("__dpadMove(-25,0)", null); true
+                            }
+                            KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                                webView.evaluateJavascript("__dpadMove( 25,0)", null); true
+                            }
+                            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                                webView.evaluateJavascript("__dpadClick()", null); true
+                            }
                             else -> false
                         }
                     }
@@ -226,18 +229,25 @@ object WebViewSniffer {
     }
 
     private fun sortResults(list: List<SniffResult>): List<SniffResult> =
-        list.sortedWith(compareBy(
-            { if (it.url.contains("/master.m3u8")) 0 else if (it.url.contains(".m3u8")) 1 else 2 },
-            { it.url.length }
-        ))
+        list.sortedWith(
+            compareBy(
+                {
+                    when {
+                        it.url.contains("/master.m3u8") -> 0
+                        it.url.contains(".m3u8") -> 1
+                        it.url.contains(".mp4") -> 2
+                        else -> 3
+                    }
+                },
+                { it.url.length }
+            )
+        )
 
     private fun isMediaUrl(u: String): Boolean {
         val l = u.lowercase()
         if (AD_DOMAINS.any { l.contains(it) }) return false
-
         val segmentPattern = Regex(""".*\.(ts|m4s|key|aac|vtt|srt|jpg|png|webp|gif)(\?.*)?$""")
         if (segmentPattern.matches(l)) return false
-
         if (l.contains(".m3u8") || l.contains(".mp4")) return true
         return false
     }
