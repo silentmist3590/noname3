@@ -5,6 +5,7 @@ include(":Vidnest")
 include(":Cinezo")
 include(":Vidfyi")
 include(":MovieHDH")
+include(":Vidup")
 
 
 pluginManagement {
