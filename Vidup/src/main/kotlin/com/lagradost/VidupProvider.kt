@@ -2,6 +2,7 @@ package com.lagradost
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -20,11 +21,18 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
+import java.util.zip.ZipInputStream
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
@@ -35,6 +43,12 @@ class VidupProvider : MainAPI() {
     override val hasMainPage = true
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
+
+    companion object {
+        // Có thể dán sẵn API Key SubDL miễn phí (lấy tại https://subdl.com/panel/api)
+        // Hoặc nhập trực tiếp trong mục Cài đặt Plugin (biểu tượng bánh răng) trên CloudStream
+        private const val DEFAULT_SUBDL_API_KEY = "xHeOWlCfS9o4EKmK7OwbeOBIhfbIHr2Y"
+    }
 
     // User-Agent Chrome chuẩn (tránh Cloudflare block Headless và vượt check Chrome của player)
     private val ua =
@@ -356,23 +370,222 @@ class VidupProvider : MainAPI() {
         json.optString(if (isTv) "first_air_date" else "release_date", "")
 
     // =========================================================================
-    // OpenSubtitles Helper (UTF-8 Uncompressed)
+    // Subtitle Downloader: OpenSubtitles (REST + Stremio V3) & SubDL (API + Unzip)
     // =========================================================================
 
-    private suspend fun fetchOpenSubtitles(
+    private data class SubtitleCandidate(
+        val source: String,
+        val langLabel: String,
+        val langCode: String,
+        val url: String,
+        val releaseHint: String,
+        val isZip: Boolean
+    )
+
+    private fun resolveAppContext(): Context? {
+        VidupSubtitleStore.getAppContext()?.let { return it }
+        CommonActivity.activity?.let { return it.applicationContext ?: it }
+        return runCatching {
+            val at = Class.forName("android.app.ActivityThread")
+            val method = at.getMethod("currentApplication")
+            method.invoke(null) as? Context
+        }.getOrNull()
+    }
+
+    private fun isAutoDownloadSubsEnabled(ctx: Context?): Boolean {
+        if (ctx == null) return true
+        return runCatching {
+            ctx.getSharedPreferences(VidupSubtitleStore.PREFS_NAME, Context.MODE_PRIVATE)
+                .getBoolean(VidupSubtitleStore.KEY_AUTO_DOWNLOAD, true)
+        }.getOrDefault(true)
+    }
+
+    private fun resolveSubdlApiKey(ctx: Context?): String {
+        val saved = ctx?.let {
+            runCatching {
+                it.getSharedPreferences(VidupSubtitleStore.PREFS_NAME, Context.MODE_PRIVATE)
+                    .getString(VidupSubtitleStore.KEY_SUBDL_API, "")?.trim() ?: ""
+            }.getOrDefault("")
+        } ?: ""
+        return saved.ifBlank { DEFAULT_SUBDL_API_KEY.trim() }
+    }
+
+    private suspend fun httpDownloadBytes(
+        urlStr: String,
+        headers: Map<String, String> = emptyMap(),
+        timeoutMs: Int = 12_000
+    ): ByteArray? = withContext(Dispatchers.IO) {
+        var current = urlStr
+        for (hop in 0..3) {
+            var conn: HttpURLConnection? = null
+            try {
+                conn = (URL(current).openConnection() as HttpURLConnection).apply {
+                    instanceFollowRedirects = false
+                    connectTimeout = timeoutMs
+                    readTimeout = timeoutMs
+                    requestMethod = "GET"
+                    setRequestProperty("User-Agent", ua)
+                    headers.forEach { (k, v) -> setRequestProperty(k, v) }
+                }
+                val code = conn.responseCode
+                if (code in 300..399) {
+                    val loc = conn.getHeaderField("Location")?.trim()
+                    if (!loc.isNullOrBlank()) {
+                        current = if (loc.startsWith("http", ignoreCase = true)) loc else URL(URL(current), loc).toString()
+                        continue
+                    }
+                }
+                if (code !in 200..299) return@withContext null
+                return@withContext conn.inputStream.use { it.readBytes() }
+            } catch (_: Exception) {
+                return@withContext null
+            } finally {
+                conn?.disconnect()
+            }
+        }
+        null
+    }
+
+    private fun isZipBytes(bytes: ByteArray): Boolean =
+        bytes.size >= 4 && bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte()
+
+    private fun isHtmlOrErrorBytes(bytes: ByteArray): Boolean {
+        val head = bytes.take(250).toByteArray().toString(Charsets.UTF_8).trimStart()
+        return head.startsWith("<!doctype", ignoreCase = true) ||
+            head.startsWith("<html", ignoreCase = true) ||
+            (head.startsWith("{") && head.contains("\"error\"", ignoreCase = true))
+    }
+
+    private fun matchesEpisodeHint(fileName: String, season: Int?, episode: Int?): Boolean {
+        if (season == null || episode == null) return true
+        val lower = fileName.lowercase()
+        val s2 = season.toString().padStart(2, '0')
+        val e2 = episode.toString().padStart(2, '0')
+        val patterns = listOf(
+            "s${s2}e${e2}",
+            "s${season}e${e2}",
+            "s${s2}e${episode}",
+            "${season}x${e2}",
+            "${s2}x${e2}",
+            "episode.${e2}",
+            "episode_${e2}",
+            "ep${e2}"
+        )
+        return patterns.any { lower.contains(it) }
+    }
+
+    private fun extractSubtitleFromZip(
+        zipBytes: ByteArray,
         ref: MediaRef,
-        imdbId: String,
-        subtitleCallback: (SubtitleFile) -> Unit
-    ): Int {
-        if (imdbId.isBlank()) return 0
+        outDir: File,
+        baseFileName: String
+    ): File? {
+        val validExts = listOf(".srt", ".vtt", ".ass", ".ssa")
+        val collected = mutableListOf<Pair<String, ByteArray>>()
+
+        ZipInputStream(ByteArrayInputStream(zipBytes)).use { zis ->
+            var entry = zis.nextEntry
+            while (entry != null) {
+                val entryName = entry.name ?: ""
+                val lower = entryName.lowercase()
+                if (!entry.isDirectory &&
+                    !lower.contains("__macosx/") &&
+                    validExts.any { lower.endsWith(it) }
+                ) {
+                    val data = zis.readBytes()
+                    if (data.isNotEmpty() && !isHtmlOrErrorBytes(data)) {
+                        collected.add(entryName to data)
+                    }
+                }
+                zis.closeEntry()
+                entry = zis.nextEntry
+            }
+        }
+        if (collected.isEmpty()) return null
+
+        val best = collected.sortedWith(
+            compareBy<Pair<String, ByteArray>>(
+                { if (ref.type == "tv" && !matchesEpisodeHint(it.first, ref.season, ref.episode)) 1 else 0 },
+                {
+                    val l = it.first.lowercase()
+                    when {
+                        l.endsWith(".srt") -> 0
+                        l.endsWith(".vtt") -> 1
+                        else -> 2
+                    }
+                }
+            )
+        ).first()
+
+        val ext = best.first.substringAfterLast('.', "srt").lowercase().let {
+            if (it in listOf("srt", "vtt", "ass", "ssa")) it else "srt"
+        }
+        val outFile = File(outDir, "$baseFileName.$ext")
+        FileOutputStream(outFile).use { it.write(best.second) }
+        return outFile
+    }
+
+    private suspend fun downloadAndResolveSubtitle(
+        cand: SubtitleCandidate,
+        ref: MediaRef,
+        subDir: File?,
+        downloadToLocal: Boolean,
+        index: Int
+    ): Pair<String, String>? {
+        val label = "${cand.source} • ${cand.langLabel}" +
+            (if (cand.releaseHint.isNotBlank()) " (${cand.releaseHint.take(28)})" else "")
+
+        if (cand.isZip) {
+            val targetDir = subDir ?: return null
+            val hdrs = mapOf("Referer" to "https://subdl.com/", "Accept" to "*/*")
+            val bytes = httpDownloadBytes(cand.url, hdrs, timeoutMs = 15_000) ?: return null
+            if (bytes.isEmpty() || isHtmlOrErrorBytes(bytes)) return null
+
+            val safeName = "subdl_${ref.tmdbId}_${ref.season ?: 0}_${ref.episode ?: 0}_${cand.langCode}_$index"
+            val outFile = if (isZipBytes(bytes)) {
+                extractSubtitleFromZip(bytes, ref, targetDir, safeName)
+            } else {
+                File(targetDir, "$safeName.srt").also { f ->
+                    FileOutputStream(f).use { it.write(bytes) }
+                }
+            } ?: return null
+
+            return "$label [Downloaded]" to Uri.fromFile(outFile).toString()
+        }
+
+        if (downloadToLocal && subDir != null) {
+            val osHdrs = if (cand.url.contains("opensubtitles.org")) {
+                mapOf("User-Agent" to "trailers.to-UA", "X-User-Agent" to "trailers.to-UA")
+            } else {
+                emptyMap()
+            }
+            val bytes = httpDownloadBytes(cand.url, osHdrs, timeoutMs = 10_000)
+            if (bytes != null && bytes.size > 40 && !isHtmlOrErrorBytes(bytes)) {
+                val safeName = "os_${ref.tmdbId}_${ref.season ?: 0}_${ref.episode ?: 0}_${cand.langCode}_$index"
+                val ext = if (bytes.take(30).toByteArray().toString(Charsets.UTF_8).contains("WEBVTT", ignoreCase = true)) {
+                    "vtt"
+                } else {
+                    "srt"
+                }
+                val outFile = File(subDir, "$safeName.$ext")
+                FileOutputStream(outFile).use { it.write(bytes) }
+                return "$label [Downloaded]" to Uri.fromFile(outFile).toString()
+            }
+        }
+
+        return label to cand.url
+    }
+
+    private suspend fun queryOpenSubtitlesRest(ref: MediaRef, imdbId: String): List<SubtitleCandidate> {
+        if (imdbId.isBlank()) return emptyList()
         val cleanId = imdbId.removePrefix("tt").trimStart('0').ifEmpty { imdbId.removePrefix("tt") }
         val headers = mapOf(
             "User-Agent" to "trailers.to-UA",
             "X-User-Agent" to "trailers.to-UA"
         )
 
-        val fetched = listOf("vie" to "Vietnamese", "eng" to "English").amap { (langCode, langFallback) ->
-            val out = mutableListOf<Pair<String, String>>()
+        return listOf("vie" to "Vietnamese", "eng" to "English").amap { (langCode, langFallback) ->
+            val out = mutableListOf<SubtitleCandidate>()
             runCatching {
                 val url = if (ref.type == "tv" && ref.season != null && ref.episode != null) {
                     "https://rest.opensubtitles.org/search/episode-${ref.episode}/imdbid-$cleanId/season-${ref.season}/sublanguageid-$langCode"
@@ -383,7 +596,6 @@ class VidupProvider : MainAPI() {
                 if (!res.startsWith("[")) return@runCatching
                 val arr = JSONArray(res)
 
-                // Ưu tiên định dạng srt/vtt trước ass/ssa
                 val items = (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
                     .sortedBy { obj ->
                         when (obj.optString("SubFormat", "").lowercase()) {
@@ -392,27 +604,207 @@ class VidupProvider : MainAPI() {
                         }
                     }
 
-                for (item in items.take(5)) {
+                for (item in items.take(4)) {
                     val rawLink = item.optString("SubDownloadLink", "").trim()
                     if (!rawLink.startsWith("http")) continue
                     val directLink = rawLink
                         .replace("/file/", "/subencoding-utf8/file/")
                         .removeSuffix(".gz")
                     val langName = item.optString("LanguageName", langFallback).trim()
-                    out.add(langName to directLink)
+                    val relName = item.optString("MovieReleaseName", "").trim()
+                    out.add(
+                        SubtitleCandidate(
+                            source = "OpenSubtitles",
+                            langLabel = langName,
+                            langCode = langCode,
+                            url = directLink,
+                            releaseHint = relName,
+                            isZip = false
+                        )
+                    )
                 }
             }
             out
         }.flatten()
+    }
 
-        val seen = HashSet<String>()
+    private suspend fun queryOpenSubtitlesStremio(ref: MediaRef, imdbId: String): List<SubtitleCandidate> {
+        if (imdbId.isBlank()) return emptyList()
+        val url = if (ref.type == "tv") {
+            val s = ref.season ?: 1
+            val e = ref.episode ?: 1
+            "https://opensubtitles-v3.strem.io/subtitles/series/$imdbId:$s:$e.json"
+        } else {
+            "https://opensubtitles-v3.strem.io/subtitles/movie/$imdbId.json"
+        }
+
+        val out = mutableListOf<SubtitleCandidate>()
+        runCatching {
+            val text = app.get(url, headers = mapOf("User-Agent" to ua), timeout = 8L).text.trim()
+            if (!text.startsWith("{")) return@runCatching
+            val arr = JSONObject(text).optJSONArray("subtitles") ?: return@runCatching
+
+            val viList = mutableListOf<SubtitleCandidate>()
+            val enList = mutableListOf<SubtitleCandidate>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val subUrl = obj.optString("url", "").trim()
+                if (!subUrl.startsWith("http")) continue
+                val l = obj.optString("lang", "").lowercase()
+                val rel = obj.optString("releaseGroup", "").ifBlank {
+                    obj.optString("movieReleaseName", "")
+                }.trim()
+                when {
+                    l == "vie" || l == "vi" -> if (viList.size < 3) {
+                        viList.add(SubtitleCandidate("OpenSubtitles-V3", "Vietnamese", "vi", subUrl, rel, false))
+                    }
+                    l == "eng" || l == "en" -> if (enList.size < 3) {
+                        enList.add(SubtitleCandidate("OpenSubtitles-V3", "English", "en", subUrl, rel, false))
+                    }
+                }
+            }
+            out.addAll(viList)
+            out.addAll(enList)
+        }
+        return out
+    }
+
+    private suspend fun querySubdl(ref: MediaRef, imdbId: String, apiKey: String): List<SubtitleCandidate> {
+        if (apiKey.isBlank()) return emptyList()
+        val encKey = URLEncoder.encode(apiKey, "UTF-8")
+        val idParam = if (imdbId.startsWith("tt")) {
+            "imdb_id=${URLEncoder.encode(imdbId, "UTF-8")}"
+        } else {
+            "tmdb_id=${ref.tmdbId}"
+        }
+        val queryUrl = if (ref.type == "tv") {
+            val s = ref.season ?: 1
+            val e = ref.episode ?: 1
+            "https://api.subdl.com/api/v1/subtitles?api_key=$encKey&$idParam&type=tv&season_number=$s&episode_number=$e&languages=VI,EN"
+        } else {
+            "https://api.subdl.com/api/v1/subtitles?api_key=$encKey&$idParam&type=movie&languages=VI,EN"
+        }
+
+        val out = mutableListOf<SubtitleCandidate>()
+        runCatching {
+            val resp = app.get(
+                queryUrl,
+                headers = mapOf("User-Agent" to ua, "Accept" to "application/json"),
+                timeout = 10L
+            )
+            if (resp.code !in 200..299) {
+                ClipboardLogger.logAndCopy("SubDL", "HTTP ${resp.code}: ${resp.text.take(150)}")
+                return@runCatching
+            }
+            val json = JSONObject(resp.text)
+            if (!json.optBoolean("status", false)) {
+                ClipboardLogger.logAndCopy("SubDL", "API status=false: ${json.optString("error")}")
+                return@runCatching
+            }
+            val subs = json.optJSONArray("subtitles") ?: return@runCatching
+
+            val viItems = mutableListOf<JSONObject>()
+            val enItems = mutableListOf<JSONObject>()
+            for (i in 0 until subs.length()) {
+                val obj = subs.optJSONObject(i) ?: continue
+                val l = obj.optString("language", "").lowercase()
+                if (l.contains("vietnam") || l == "vi" || l == "vie") {
+                    viItems.add(obj)
+                } else if (l.contains("english") || l == "en" || l == "eng") {
+                    enItems.add(obj)
+                }
+            }
+
+            val sortedVi = viItems.sortedBy { if (it.optBoolean("hi", false)) 1 else 0 }.take(3)
+            val sortedEn = enItems.sortedBy { if (it.optBoolean("hi", false)) 1 else 0 }.take(3)
+
+            for ((langCode, langName, list) in listOf(
+                Triple("vi", "Vietnamese", sortedVi),
+                Triple("en", "English", sortedEn)
+            )) {
+                for (item in list) {
+                    val rawPath = item.optString("url", "").trim()
+                    if (rawPath.isBlank()) continue
+                    val fullUrl = when {
+                        rawPath.startsWith("http", ignoreCase = true) -> rawPath
+                        rawPath.startsWith("/") -> "https://dl.subdl.com$rawPath"
+                        else -> "https://dl.subdl.com/$rawPath"
+                    }
+                    val release = item.optString("release_name", "").ifBlank {
+                        item.optString("name", "")
+                    }.trim()
+                    out.add(
+                        SubtitleCandidate(
+                            source = "SubDL",
+                            langLabel = langName,
+                            langCode = langCode,
+                            url = fullUrl,
+                            releaseHint = release,
+                            isZip = true
+                        )
+                    )
+                }
+            }
+        }.onFailure { ex ->
+            ClipboardLogger.logAndCopy("SubDL Err", "${ex.message}")
+        }
+        return out
+    }
+
+    private suspend fun fetchAndDownloadSubtitles(
+        ref: MediaRef,
+        imdbId: String,
+        subtitleCallback: (SubtitleFile) -> Unit
+    ): Int {
+        val ctx = resolveAppContext()
+        val subDir = VidupSubtitleStore.getSubtitlesDir(ctx)
+        val autoDownload = isAutoDownloadSubsEnabled(ctx)
+        val subdlKey = resolveSubdlApiKey(ctx)
+
+        if (subdlKey.isBlank()) {
+            ClipboardLogger.logAndCopy(
+                "SubDL",
+                "Chưa cài SubDL API Key (mở Cài đặt Plugin để dán key hoặc dùng DEFAULT_SUBDL_API_KEY)"
+            )
+        }
+
+        val sourcesResults = listOf(0, 1, 2).amap { idx ->
+            when (idx) {
+                0 -> queryOpenSubtitlesRest(ref, imdbId)
+                1 -> queryOpenSubtitlesStremio(ref, imdbId)
+                else -> querySubdl(ref, imdbId, subdlKey)
+            }
+        }.flatten()
+
+        val seenUrls = HashSet<String>()
+        val candidates = sourcesResults.filter { seenUrls.add(it.url) }
+
+        val localDownloadsCount = HashMap<String, Int>()
+        val indexedCandidates = candidates.mapIndexed { idx, c ->
+            val key = "${c.source}:${c.langCode}"
+            val currentForKey = localDownloadsCount[key] ?: 0
+            val shouldDownload = if (c.isZip) {
+                true
+            } else {
+                autoDownload && currentForKey < 2
+            }
+            if (shouldDownload) localDownloadsCount[key] = currentForKey + 1
+            Triple(idx, c, shouldDownload)
+        }
+
+        val resolved = indexedCandidates.amap { (idx, cand, shouldDownload) ->
+            downloadAndResolveSubtitle(cand, ref, subDir, shouldDownload, idx)
+        }.filterNotNull()
+
+        val emittedSet = HashSet<String>()
         var count = 0
-        for ((label, subUrl) in fetched) {
-            if (seen.add(subUrl)) {
-                subtitleCallback.invoke(SubtitleFile(label, subUrl))
+        for ((label, finalSubUri) in resolved) {
+            if (emittedSet.add(finalSubUri)) {
+                subtitleCallback.invoke(SubtitleFile(label, finalSubUri))
                 count++
             }
         }
+        ClipboardLogger.logAndCopy("Subtitles", "Đã nạp/tải $count phụ đề (OpenSubtitles + SubDL)")
         return count
     }
 
@@ -425,15 +817,6 @@ class VidupProvider : MainAPI() {
         val reqHeaders: Map<String, String>,
         val subs: List<String>
     )
-
-    private fun resolveAppContext(): Context? {
-        CommonActivity.activity?.let { return it }
-        return runCatching {
-            val at = Class.forName("android.app.ActivityThread")
-            val method = at.getMethod("currentApplication")
-            method.invoke(null) as? Context
-        }.getOrNull()
-    }
 
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun sniffStream(
@@ -680,7 +1063,7 @@ class VidupProvider : MainAPI() {
             return false
         }
 
-        // 1. Lấy IMDB ID nếu chưa có để nạp phụ đề tiếng Việt & tiếng Anh từ OpenSubtitles
+        // 1. Lấy IMDB ID nếu chưa có để tải phụ đề từ OpenSubtitles + SubDL (giải nén & lưu cục bộ)
         var imdbId = imdbCache[ref.tmdbId] ?: ""
         if (imdbId.isBlank()) {
             val details = tmdbGet("/${ref.type}/${ref.tmdbId}?append_to_response=external_ids")
@@ -691,7 +1074,7 @@ class VidupProvider : MainAPI() {
                 imdbCache[ref.tmdbId] = imdbId
             }
         }
-        val osSubCount = fetchOpenSubtitles(ref, imdbId, subtitleCallback)
+        val subCount = fetchAndDownloadSubtitles(ref, imdbId, subtitleCallback)
 
         // 2. Tạo danh sách URL embed với autoPlay=true (mặc định + server dự phòng)
         val baseEmbedUrl = if (ref.type == "tv") {
@@ -803,7 +1186,7 @@ class VidupProvider : MainAPI() {
 
         ClipboardLogger.logAndCopy(
             if (emittedLinks > 0) "Done" else "Failed",
-            "Đã nạp $emittedLinks luồng phát & ${osSubCount + sniffSubCount} phụ đề."
+            "Đã nạp $emittedLinks luồng phát & ${subCount + sniffSubCount} phụ đề."
         )
         return emittedLinks > 0
     }
