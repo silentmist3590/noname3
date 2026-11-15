@@ -15,7 +15,11 @@ class MoviesHDHub : MainAPI() {
     override val hasMainPage = true
     override var hasQuickSearch = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
-    override val usesWebView = false
+    override val usesWebView = true
+    override val webViewResolver = com.lagradost.cloudstream3.network.WebViewResolver(
+        interceptUrl = Regex(""".*\.m3u8.*"""),
+        additionalUrls = listOf(Regex(""".*\.mp4.*"""))
+        )
 
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Featured & Latest",
