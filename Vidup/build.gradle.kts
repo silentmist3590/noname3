@@ -11,3 +11,4 @@ cloudstream {
     tvTypes = listOf("Movie", "TvSeries")
     iconUrl = "https://vidup.to/favicon.ico"
 }
+android { namespace = "com.lagradost" }
