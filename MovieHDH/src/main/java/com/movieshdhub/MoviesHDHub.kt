@@ -1,9 +1,7 @@
 package com.movieshdhub
 
-import android.webkit.CookieManager
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.network.CloudflareKiller
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.json.JSONObject
@@ -42,20 +40,6 @@ class MoviesHDHub : MainAPI() {
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language" to "en-US,en;q=0.9"
     )
-
-    private fun streamHeaders(referer: String, cookies: String = ""): Map<String, String> {
-        val m = mutableMapOf(
-            "User-Agent" to UA,
-            "Referer" to referer,
-            "Origin" to referer.trimEnd('/'),
-            "Accept" to "*/*",
-            "Accept-Language" to "en-US,en;q=0.9",
-            "Accept-Encoding" to "identity",
-            "Connection" to "keep-alive"
-        )
-        if (cookies.isNotBlank()) m["Cookie"] = cookies
-        return m
-    }
 
     // =====================================================================
     // HOME
@@ -216,7 +200,7 @@ class MoviesHDHub : MainAPI() {
     }
 
     // =====================================================================
-    // LOAD LINKS — CloudflareKiller bypass
+    // LOAD LINKS — dùng full headers từ WebView
     // =====================================================================
     override suspend fun loadLinks(
         data: String,
@@ -284,65 +268,45 @@ class MoviesHDHub : MainAPI() {
                     else -> target.referer
                 }
 
-                val baseHdrs = streamHeaders(domainRef, target.cookies)
+                // Build headers từ WebView request gốc
+                val finalHdrs = mutableMapOf<String, String>()
+                target.requestHeaders.forEach { (k, v) ->
+                    if (!k.equals("Content-Length", true) &&
+                        !k.equals("Host", true) &&
+                        !k.equals("Connection", true)
+                    ) finalHdrs[k] = v
+                }
+                // Đảm bảo có Referer + Origin
+                if (finalHdrs.keys.none { it.equals("Referer", true) })
+                    finalHdrs["Referer"] = domainRef
+                if (finalHdrs.keys.none { it.equals("Origin", true) })
+                    finalHdrs["Origin"] = domainRef.trimEnd('/')
+                if (finalHdrs.keys.none { it.equals("User-Agent", true) })
+                    finalHdrs["User-Agent"] = UA
+                if (target.cookies.isNotBlank())
+                    finalHdrs["Cookie"] = target.cookies
 
                 ClipboardLogger.logAndCopy(
                     "TARGET",
-                    "url=${target.url.take(150)} | sniffCookie.len=${target.cookies.length}"
+                    "url=${target.url.take(150)} | hdrs=[${finalHdrs.keys.joinToString(",")}] | cookie.len=${target.cookies.length}"
                 )
 
-                // ============================================================
-                // BƯỚC QUAN TRỌNG: CloudflareKiller BYPASS
-                // Fetch m3u8 qua WebView (full navigation) → CF challenge tự giải
-                // → cf_clearance cookie được set → đọc lại cookie
-                // ============================================================
-                var finalCookie = target.cookies
-                var cfOk = false
+                // TEST 1 LẦN ĐỂ VERIFY
                 try {
-                    val cfKiller = CloudflareKiller()
-                    val cfResp = app.get(
-                        target.url,
-                        headers = baseHdrs,
-                        interceptor = cfKiller
-                    )
+                    val test = app.get(target.url, headers = finalHdrs)
                     ClipboardLogger.logAndCopy(
-                        "CF-FETCH", "code=${cfResp.code} len=${cfResp.text.length}"
+                        "TEST", "code=${test.code} len=${test.text.length}"
                     )
-                    if (cfResp.code in 200..299 && cfResp.text.isNotBlank()) {
-                        cfOk = true
+                    if (test.code !in 200..299) {
+                        ClipboardLogger.logAndCopy("TEST", "REJECTED — skip")
+                        continue
                     }
                 } catch (e: Exception) {
-                    ClipboardLogger.logAndCopy("CF-FETCH", "fail: ${e.message}")
+                    ClipboardLogger.logAndCopy("TEST", "fail: ${e.message}")
                 }
 
-                // Đọc lại cookie từ CookieManager sau khi CFKiller chạy
-                val freshCookie = try {
-                    CookieManager.getInstance().getCookie(target.url).orEmpty()
-                } catch (_: Throwable) { "" }
-
-                if (freshCookie.isNotBlank()) {
-                    finalCookie = listOf(target.cookies, freshCookie)
-                        .filter { it.isNotBlank() }
-                        .distinct()
-                        .joinToString("; ")
-                }
-                ClipboardLogger.logAndCopy(
-                    "CF-COOKIE",
-                    "cfOk=$cfOk | finalCookie.len=${finalCookie.length}"
-                )
-
-                val finalHdrs = streamHeaders(domainRef, finalCookie)
-
-                if (!cfOk && finalCookie.isBlank()) {
-                    ClipboardLogger.logAndCopy("SERVER-$nume", "CF bypass failed + no cookie — skip")
-                    continue
-                }
-
-                // ============================================================
-                // EMIT
-                // ============================================================
+                // EMIT — dùng headers từ WebView
                 if (target.url.contains(".m3u8")) {
-                    // 1. Raw M3U8 — ExoPlayer phát ngay
                     try {
                         callback(newExtractorLink(
                             source = "$name [$label]",
@@ -359,20 +323,18 @@ class MoviesHDHub : MainAPI() {
                         ClipboardLogger.logAndCopy("EMIT-RAW", "fail: ${t.message}")
                     }
 
-                    // 2. M3U8Helper — bổ sung đa chất lượng
-                    if (cfOk) {
-                        try {
-                            val gen = M3u8Helper.generateM3u8(
-                                source = "$name [$label]",
-                                streamUrl = target.url,
-                                referer = domainRef,
-                                headers = finalHdrs
-                            )
-                            ClipboardLogger.logAndCopy("M3U8-RES", "found ${gen.size}")
-                            gen.forEach { callback(it); emitted = true }
-                        } catch (t: Throwable) {
-                            ClipboardLogger.logAndCopy("M3U8-FAIL", "${t.message}")
-                        }
+                    // Thử bóc variant qua M3U8Helper với cùng headers
+                    try {
+                        val gen = M3u8Helper.generateM3u8(
+                            source = "$name [$label]",
+                            streamUrl = target.url,
+                            referer = domainRef,
+                            headers = finalHdrs
+                        )
+                        ClipboardLogger.logAndCopy("M3U8-RES", "found ${gen.size}")
+                        gen.forEach { callback(it); emitted = true }
+                    } catch (t: Throwable) {
+                        ClipboardLogger.logAndCopy("M3U8-FAIL", "${t.message}")
                     }
                 } else if (target.url.contains(".mp4")) {
                     callback(newExtractorLink(
