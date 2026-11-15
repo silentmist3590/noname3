@@ -7,6 +7,7 @@ include(":Vidfyi")
 include(":MovieHDH")
 include(":Vidup")
 include(":Vidcore")
+include(":Vidspark")
 
 
 pluginManagement {
