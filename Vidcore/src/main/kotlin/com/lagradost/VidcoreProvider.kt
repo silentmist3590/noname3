@@ -31,7 +31,9 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.URL
 import java.net.URLEncoder
+import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.ZipInputStream
 import kotlin.coroutines.resume
@@ -48,7 +50,7 @@ class VidcoreProvider : MainAPI() {
     companion object {
         // Có thể dán sẵn API Key SubDL miễn phí (lấy tại https://subdl.com/panel/api)
         // Hoặc nhập trực tiếp trong mục Cài đặt Plugin (biểu tượng bánh răng) trên CloudStream
-        private const val DEFAULT_SUBDL_API_KEY = "xHeOWlCfS9o4EKmK7OwbeOBIhfbIHr2Y"
+        private const val DEFAULT_SUBDL_API_KEY = ""
     }
 
     // User-Agent Chrome chuẩn
@@ -848,19 +850,125 @@ class VidcoreProvider : MainAPI() {
     // WebView Sniffer chuyên biệt cho vidcore.org (?autoplay=true)
     // =========================================================================
 
-    private data class SniffResult(
+    private data class ProbeOutcome(
+        val linkType: ExtractorLinkType?,
+        val statusCode: Int,
+        val workingHeaders: Map<String, String>
+    )
+
+    private data class VerifiedSniffResult(
         val url: String,
-        val reqHeaders: Map<String, String>,
+        val linkType: ExtractorLinkType,
+        val statusCode: Int,
+        val workingHeaders: Map<String, String>,
         val subs: List<String>
     )
+
+    private fun buildHeaderCandidates(capturedHeaders: Map<String, String>): List<Map<String, String>> {
+        val withCaptured = capturedHeaders.toMutableMap().apply {
+            put("User-Agent", ua)
+            if (!containsKey("Accept") && !containsKey("accept")) put("Accept", "*/*")
+        }
+        val withVidcore = withCaptured.toMutableMap().apply {
+            put("Referer", "$mainUrl/")
+            put("Origin", mainUrl)
+        }
+        val noRef = withCaptured.toMutableMap().apply {
+            remove("Referer")
+            remove("referer")
+            remove("Origin")
+            remove("origin")
+        }
+        return listOf(withCaptured, withVidcore, noRef).distinct()
+    }
+
+    private fun probeStreamBlocking(
+        rawUrl: String,
+        headerCandidates: List<Map<String, String>>
+    ): ProbeOutcome {
+        val isMp4 = Regex("""\.mp4(\?|$|#)""", RegexOption.IGNORE_CASE).containsMatchIn(rawUrl)
+        var lastCode = 0
+
+        for (baseHdrs in headerCandidates) {
+            val probeHdrs = if (isMp4) baseHdrs + ("Range" to "bytes=0-1023") else baseHdrs
+            var conn: HttpURLConnection? = null
+            try {
+                var currentUrl = rawUrl
+                for (hop in 0..3) {
+                    conn?.disconnect()
+                    conn = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
+                        instanceFollowRedirects = false
+                        connectTimeout = 8_000
+                        readTimeout = 8_000
+                        requestMethod = "GET"
+                        probeHdrs.forEach { (k, v) -> setRequestProperty(k, v) }
+                    }
+                    val code = conn.responseCode
+                    lastCode = code
+                    if (code in 300..399) {
+                        val loc = conn.getHeaderField("Location")?.trim()
+                        if (!loc.isNullOrBlank()) {
+                            currentUrl = if (loc.startsWith("http", ignoreCase = true)) loc else URL(URL(currentUrl), loc).toString()
+                            continue
+                        }
+                    }
+                    break
+                }
+
+                val activeConn = conn ?: continue
+                if (lastCode !in 200..299) continue
+
+                val buf = ByteArray(2048)
+                val readLen = activeConn.inputStream.use { input ->
+                    var total = 0
+                    while (total < buf.size) {
+                        val n = input.read(buf, total, buf.size - total)
+                        if (n <= 0) break
+                        total += n
+                    }
+                    total
+                }
+                val snippet = String(buf, 0, readLen, Charsets.UTF_8).trimStart()
+
+                if (isMp4) {
+                    if (snippet.startsWith("<!doctype", ignoreCase = true) ||
+                        snippet.startsWith("<html", ignoreCase = true) ||
+                        snippet.startsWith("{")
+                    ) {
+                        continue
+                    }
+                    return ProbeOutcome(ExtractorLinkType.VIDEO, lastCode, baseHdrs)
+                } else {
+                    val detected = when {
+                        snippet.contains("#EXTM3U") -> ExtractorLinkType.M3U8
+                        snippet.contains("<MPD", ignoreCase = true) -> ExtractorLinkType.DASH
+                        snippet.startsWith("<!doctype", ignoreCase = true) ||
+                            snippet.startsWith("<html", ignoreCase = true) ||
+                            snippet.startsWith("{") -> null
+                        rawUrl.contains(".mpd", ignoreCase = true) || rawUrl.contains("dash-mpd", ignoreCase = true) ->
+                            ExtractorLinkType.DASH
+                        rawUrl.contains(".m3u8", ignoreCase = true) ->
+                            ExtractorLinkType.M3U8
+                        else -> null
+                    }
+                    if (detected != null) {
+                        return ProbeOutcome(detected, lastCode, baseHdrs)
+                    }
+                }
+            } catch (_: Exception) {
+            } finally {
+                try { conn?.disconnect() } catch (_: Exception) { }
+            }
+        }
+        return ProbeOutcome(null, lastCode, headerCandidates.firstOrNull() ?: emptyMap())
+    }
 
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun sniffVidcoreStream(
         pageUrl: String,
         refererUrl: String,
-        excludedUrls: Set<String>,
         seenRequests: MutableList<String>
-    ): SniffResult? {
+    ): VerifiedSniffResult? {
         return suspendCoroutine { cont ->
             val handler = Handler(Looper.getMainLooper())
             handler.post {
@@ -876,12 +984,12 @@ class VidcoreProvider : MainAPI() {
                     val w = 1080
                     val h = 1920
                     val wv = WebView(ctx)
-                    var finished = false
-                    val capturedSubs = LinkedHashSet<String>()
+                    val finished = AtomicBoolean(false)
+                    val capturedSubs = Collections.synchronizedSet(LinkedHashSet<String>())
+                    val probedUrls = Collections.synchronizedSet(HashSet<String>())
 
-                    fun finish(res: SniffResult?) {
-                        if (finished) return
-                        finished = true
+                    fun finish(res: VerifiedSniffResult?) {
+                        if (!finished.compareAndSet(false, true)) return
                         handler.removeCallbacksAndMessages(null)
                         try {
                             wv.stopLoading()
@@ -949,7 +1057,7 @@ class VidcoreProvider : MainAPI() {
 
                     var taps = 0
                     fun tap() {
-                        if (finished) return
+                        if (finished.get()) return
                         taps++
                         try {
                             wv.evaluateJavascript(antiPopAndPlayJs, null)
@@ -961,7 +1069,7 @@ class VidcoreProvider : MainAPI() {
                             d.recycle()
                             u.recycle()
                         } catch (_: Exception) { }
-                        if (taps < 18) handler.postDelayed({ tap() }, 1800)
+                        if (taps < 20) handler.postDelayed({ tap() }, 1800)
                     }
 
                     wv.webViewClient = object : WebViewClient() {
@@ -969,6 +1077,7 @@ class VidcoreProvider : MainAPI() {
                             view: WebView?,
                             request: WebResourceRequest?
                         ): WebResourceResponse? {
+                            if (finished.get()) return null
                             val u = request?.url?.toString() ?: return null
                             if (!u.startsWith("http", ignoreCase = true)) return null
 
@@ -984,13 +1093,40 @@ class VidcoreProvider : MainAPI() {
                                 capturedSubs.add(u)
                             }
 
-                            if (!excludedUrls.contains(u) &&
-                                streamRegex.containsMatchIn(u) &&
-                                !segmentOrAssetRegex.containsMatchIn(u)
+                            if (streamRegex.containsMatchIn(u) &&
+                                !segmentOrAssetRegex.containsMatchIn(u) &&
+                                probedUrls.add(u)
                             ) {
-                                val hdrs = request.requestHeaders ?: emptyMap()
-                                val hit = SniffResult(u, hdrs, capturedSubs.toList())
-                                handler.post { finish(hit) }
+                                val capturedHdrs = HashMap<String, String>()
+                                request.requestHeaders?.forEach { (k, v) -> capturedHdrs[k] = v }
+                                val cookie = runCatching { CookieManager.getInstance().getCookie(u) ?: "" }.getOrDefault("")
+                                if (cookie.isNotEmpty()) capturedHdrs["Cookie"] = cookie
+
+                                // Probe trên thread phụ để bỏ qua các link chết (403/404) mà không đóng WebView sớm
+                                Thread {
+                                    if (finished.get()) return@Thread
+                                    val candidates = buildHeaderCandidates(capturedHdrs)
+                                    val outcome = probeStreamBlocking(u, candidates)
+                                    if (finished.get()) return@Thread
+
+                                    val detectedType = outcome.linkType
+                                    if (detectedType != null) {
+                                        val subsSnapshot = synchronized(capturedSubs) { capturedSubs.toList() }
+                                        val verified = VerifiedSniffResult(
+                                            url = u,
+                                            linkType = detectedType,
+                                            statusCode = outcome.statusCode,
+                                            workingHeaders = outcome.workingHeaders,
+                                            subs = subsSnapshot
+                                        )
+                                        handler.post { finish(verified) }
+                                    } else {
+                                        ClipboardLogger.logAndCopy(
+                                            "Skip Dead",
+                                            "HTTP ${outcome.statusCode} -> ${u.take(120)}"
+                                        )
+                                    }
+                                }.apply { isDaemon = true }.start()
                             }
                             return null
                         }
@@ -1033,7 +1169,7 @@ class VidcoreProvider : MainAPI() {
                         act?.addContentView(wv, ViewGroup.LayoutParams(w, h))
                     } catch (_: Exception) { }
 
-                    handler.postDelayed({ finish(null) }, 35_000L)
+                    handler.postDelayed({ finish(null) }, 40_000L)
                     wv.loadUrl(pageUrl, mapOf("Referer" to refererUrl))
                 } catch (e: Exception) {
                     ClipboardLogger.logAndCopy("Sniff Exception", e.stackTraceToString().take(800))
@@ -1044,133 +1180,8 @@ class VidcoreProvider : MainAPI() {
     }
 
     // =========================================================================
-    // Pre-Flight Stream Probe + loadLinks (Chỉ lấy luồng từ vidcore.org)
+    // loadLinks (Chỉ lấy luồng từ vidcore.org)
     // =========================================================================
-
-    private data class ProbeOutcome(
-        val linkType: ExtractorLinkType?,
-        val statusCode: Int,
-        val workingHeaders: Map<String, String>
-    )
-
-    private fun buildHeaderCandidates(capturedHeaders: Map<String, String>): List<Map<String, String>> {
-        val withCaptured = capturedHeaders.toMutableMap().apply {
-            put("User-Agent", ua)
-        }
-        val withVidcore = capturedHeaders.toMutableMap().apply {
-            put("User-Agent", ua)
-            put("Referer", "$mainUrl/")
-            put("Origin", mainUrl)
-        }
-        val noRef = capturedHeaders.toMutableMap().apply {
-            put("User-Agent", ua)
-            remove("Referer")
-            remove("referer")
-            remove("Origin")
-            remove("origin")
-        }
-        return listOf(withCaptured, withVidcore, noRef).distinct()
-    }
-
-    private suspend fun probeStreamWithFallbacks(
-        rawUrl: String,
-        headerCandidates: List<Map<String, String>>
-    ): ProbeOutcome {
-        val isMp4 = Regex("""\.mp4(\?|$|#)""", RegexOption.IGNORE_CASE).containsMatchIn(rawUrl)
-
-        var lastCode = 0
-        for (baseHdrs in headerCandidates) {
-            val probeHdrs = if (isMp4) baseHdrs + ("Range" to "bytes=0-1023") else baseHdrs
-            val outcome = runCatching {
-                val resp = app.get(rawUrl, headers = probeHdrs, timeout = 8L)
-                lastCode = resp.code
-                if (resp.code !in 200..299) {
-                    return@runCatching null
-                }
-
-                if (isMp4) {
-                    val snippet = resp.text.take(300).trimStart()
-                    if (snippet.startsWith("<!doctype", ignoreCase = true) ||
-                        snippet.startsWith("<html", ignoreCase = true) ||
-                        snippet.startsWith("{")
-                    ) {
-                        null
-                    } else {
-                        ProbeOutcome(ExtractorLinkType.VIDEO, resp.code, baseHdrs)
-                    }
-                } else {
-                    val snippet = resp.text.take(1500).trimStart()
-                    val detected = when {
-                        snippet.contains("#EXTM3U") -> ExtractorLinkType.M3U8
-                        snippet.contains("<MPD", ignoreCase = true) -> ExtractorLinkType.DASH
-                        snippet.startsWith("<!doctype", ignoreCase = true) ||
-                            snippet.startsWith("<html", ignoreCase = true) ||
-                            snippet.startsWith("{") -> null
-                        rawUrl.contains(".mpd", ignoreCase = true) || rawUrl.contains("dash-mpd", ignoreCase = true) ->
-                            ExtractorLinkType.DASH
-                        rawUrl.contains(".m3u8", ignoreCase = true) ->
-                            ExtractorLinkType.M3U8
-                        else -> null
-                    }
-                    detected?.let { ProbeOutcome(it, resp.code, baseHdrs) }
-                }
-            }.getOrNull()
-
-            if (outcome != null) return outcome
-        }
-        return ProbeOutcome(null, lastCode, headerCandidates.firstOrNull() ?: emptyMap())
-    }
-
-    private suspend fun verifyAndEmitLink(
-        serverLabel: String,
-        rawUrl: String,
-        capturedHeaders: Map<String, String>,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        val candidates = buildHeaderCandidates(capturedHeaders)
-        val probe = probeStreamWithFallbacks(rawUrl, candidates)
-        val detectedType = probe.linkType
-        if (detectedType == null) {
-            ClipboardLogger.logAndCopy(
-                "Dead ($serverLabel)",
-                "HTTP ${probe.statusCode} -> ${rawUrl.take(120)}"
-            )
-            return false
-        }
-
-        val finalUrl = when (detectedType) {
-            ExtractorLinkType.M3U8 ->
-                if (rawUrl.contains(".m3u8", ignoreCase = true)) rawUrl else "$rawUrl#file.m3u8"
-            ExtractorLinkType.DASH ->
-                if (rawUrl.contains(".mpd", ignoreCase = true)) rawUrl else "$rawUrl#file.mpd"
-            else -> rawUrl
-        }
-
-        val formatLabel = when (detectedType) {
-            ExtractorLinkType.DASH -> "DASH"
-            ExtractorLinkType.M3U8 -> "HLS"
-            else -> "MP4"
-        }
-        val usedReferer = probe.workingHeaders["Referer"] ?: probe.workingHeaders["referer"] ?: ""
-
-        callback.invoke(
-            newExtractorLink(
-                source = this.name,
-                name = "Vidcore • $serverLabel ($formatLabel)",
-                url = finalUrl,
-                type = detectedType
-            ) {
-                this.referer = usedReferer
-                this.quality = Qualities.P1080.value
-                this.headers = probe.workingHeaders
-            }
-        )
-        ClipboardLogger.logAndCopy(
-            "Live ($serverLabel)",
-            "HTTP ${probe.statusCode} ($formatLabel) -> ${finalUrl.take(120)}"
-        )
-        return true
-    }
 
     override suspend fun loadLinks(
         data: String,
@@ -1210,22 +1221,17 @@ class VidcoreProvider : MainAPI() {
         }
 
         var emittedLinks = 0
-        val excludedUrls = HashSet<String>()
+        try {
+            ClipboardLogger.logAndCopy("Vidcore", "Sniff: $embedUrl")
+            val seenReqs = mutableListOf<String>()
+            val sniffed = sniffVidcoreStream(embedUrl, "$mainUrl/", seenReqs)
 
-        for (attempt in 1..2) {
-            try {
-                ClipboardLogger.logAndCopy("Vidcore #$attempt", "Sniff: $embedUrl")
-                val seenReqs = mutableListOf<String>()
-                val sniffed = sniffVidcoreStream(embedUrl, "$mainUrl/", excludedUrls, seenReqs)
-
-                if (sniffed == null) {
-                    ClipboardLogger.logAndCopy(
-                        "Miss #$attempt",
-                        "Không bắt được luồng từ vidcore.org (${seenReqs.size} reqs)"
-                    )
-                    break
-                }
-
+            if (sniffed == null) {
+                ClipboardLogger.logAndCopy(
+                    "Miss",
+                    "Không tìm thấy luồng sống từ vidcore.org (${seenReqs.size} reqs)"
+                )
+            } else {
                 for (subUrl in sniffed.subs) {
                     if (seenSubUrls.add(subUrl)) {
                         subtitleCallback.invoke(SubtitleFile("Vidcore • WebVTT", subUrl))
@@ -1233,20 +1239,45 @@ class VidcoreProvider : MainAPI() {
                     }
                 }
 
-                excludedUrls.add(sniffed.url)
-                val cookie = runCatching { CookieManager.getInstance().getCookie(sniffed.url) ?: "" }.getOrDefault("")
-                val baseHdrs = sniffed.reqHeaders.toMutableMap().apply {
-                    if (cookie.isNotEmpty()) put("Cookie", cookie)
+                val rawUrl = sniffed.url
+                val detectedType = sniffed.linkType
+                val finalUrl = when (detectedType) {
+                    ExtractorLinkType.M3U8 ->
+                        if (rawUrl.contains(".m3u8", ignoreCase = true)) rawUrl else "$rawUrl#file.m3u8"
+                    ExtractorLinkType.DASH ->
+                        if (rawUrl.contains(".mpd", ignoreCase = true)) rawUrl else "$rawUrl#file.mpd"
+                    else -> rawUrl
                 }
+                val formatLabel = when (detectedType) {
+                    ExtractorLinkType.DASH -> "DASH"
+                    ExtractorLinkType.M3U8 -> "HLS"
+                    else -> "MP4"
+                }
+                val usedReferer = sniffed.workingHeaders["Referer"]
+                    ?: sniffed.workingHeaders["referer"]
+                    ?: ""
 
-                if (verifyAndEmitLink("Auto", sniffed.url, baseHdrs, callback)) {
-                    emittedLinks++
-                    break
-                }
-            } catch (e: Exception) {
-                if (e is java.util.concurrent.CancellationException) throw e
-                ClipboardLogger.logAndCopy("Err #$attempt", "${e.message}")
+                callback.invoke(
+                    newExtractorLink(
+                        source = this.name,
+                        name = "Vidcore • Auto ($formatLabel)",
+                        url = finalUrl,
+                        type = detectedType
+                    ) {
+                        this.referer = usedReferer
+                        this.quality = Qualities.P1080.value
+                        this.headers = sniffed.workingHeaders
+                    }
+                )
+                ClipboardLogger.logAndCopy(
+                    "Live (Auto)",
+                    "HTTP ${sniffed.statusCode} ($formatLabel) -> ${finalUrl.take(120)}"
+                )
+                emittedLinks++
             }
+        } catch (e: Exception) {
+            if (e is java.util.concurrent.CancellationException) throw e
+            ClipboardLogger.logAndCopy("Err", "${e.message}")
         }
 
         ClipboardLogger.logAndCopy(
