@@ -8,6 +8,7 @@ include(":MovieHDH")
 include(":Vidup")
 include(":Vidcore")
 include(":Vidspark")
+include(":Tvhay")
 
 
 pluginManagement {
