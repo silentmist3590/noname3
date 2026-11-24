@@ -1019,6 +1019,7 @@ class VidluxProvider : MainAPI() {
             lower.contains("afrilix.com") || lower.contains("playmanifest") -> "https://www.afrilix.com/"
             lower.contains("vidrock.net") || lower.contains("1shows.app") || lower.contains("47qzoobg8k") ||
                 lower.contains("vercetti.org") || lower.contains("slowcloud.live") || lower.contains("fastcloud.live") ||
+                lower.contains("lucidmechanism") || lower.contains("fcxmb.com") || lower.contains("hscow.com") ||
                 Regex("""\borion\d*\.""").containsMatchIn(lower) || serverId == "vidrock" -> "https://vidrock.net/"
             lower.contains("vidfast.vc") || serverId == "vidfast" -> "https://vidfast.vc/"
             lower.contains("vixsrc.to") || serverId == "vixsrc" -> "https://vixsrc.to/"
@@ -1097,7 +1098,9 @@ class VidluxProvider : MainAPI() {
         val streamType: String,
         val quality: String,
         val headers: Map<String, String>,
-        val builtInCaps: List<Pair<String, String>>
+        val builtInCaps: List<Pair<String, String>>,
+        val audioLabel: String = "",
+        val audioPriority: Int = 0
     )
 
     private data class ServerFetchResult(
@@ -1113,7 +1116,8 @@ class VidluxProvider : MainAPI() {
         serverId: String,
         serverName: String,
         title: String,
-        year: Int?
+        year: Int?,
+        timeoutSec: Long = if (serverId == "spider") 20L else 10L
     ): ServerFetchResult {
         val q = StringBuilder("id=${ref.tmdbId}&type=${ref.type}&_t=${URLEncoder.encode(session.requestToken, "UTF-8")}")
         if (ref.type == "tv") {
@@ -1134,7 +1138,7 @@ class VidluxProvider : MainAPI() {
                     "Origin" to session.host,
                     "Accept" to "application/json, text/plain, */*"
                 ),
-                timeout = 10L
+                timeout = timeoutSec
             )
         }.getOrElse { ex ->
             return ServerFetchResult(0, false, emptyList(), ex.message ?: "Request failed")
@@ -1213,9 +1217,45 @@ class VidluxProvider : MainAPI() {
 
     // Nhánh client-side Spider chính thức của VidLux (port đúng hàm eJ/eQ/eY trong player JS)
     // Không tốn quota rate-limit của vidlux.xyz
+    private fun classifyAudioTrack(audioArr: JSONArray?, originalLang: String): Pair<String, Int> {
+        if (audioArr == null || audioArr.length() == 0) return "" to 0
+        val labels = mutableListOf<String>()
+        var hasPreferred = false
+        var hasDub = false
+        val orig = originalLang.lowercase().trim()
+        val dubRegex = Regex(
+            """kannada|tamil|telugu|malayalam|hindi|bengali|marathi|punjabi|gujarati|odia|bhojpuri|spanish|french|german|italian|portuguese|russian|arabic|turkish""",
+            RegexOption.IGNORE_CASE
+        )
+
+        for (i in 0 until audioArr.length()) {
+            val a = audioArr.optJSONObject(i) ?: continue
+            val lang = a.optString("language", "").lowercase().trim()
+            val lbl = a.optString("label", "").trim()
+            val disp = lbl.ifBlank { lang }
+            if (disp.isNotBlank()) labels.add(disp)
+
+            val isEnglish = lang == "eng" || lang == "en" || lbl.contains("english", ignoreCase = true)
+            val matchesOrig = orig.isNotBlank() && (lang == orig || lang.startsWith(orig) || orig.startsWith(lang))
+            if (isEnglish || matchesOrig) {
+                hasPreferred = true
+            } else if (dubRegex.containsMatchIn(lbl) || dubRegex.containsMatchIn(lang)) {
+                hasDub = true
+            }
+        }
+        val labelText = labels.distinct().take(2).joinToString(", ")
+        val prio = when {
+            hasPreferred -> 0
+            hasDub -> 2
+            else -> 1
+        }
+        return labelText to prio
+    }
+
     private suspend fun fetchVidluxBrowserSpider(
         sessionHost: String,
-        ref: MediaRef
+        ref: MediaRef,
+        originalLang: String = ""
     ): List<VidluxStreamItem> {
         val endpoints = if (ref.type == "tv") {
             val s = ref.season ?: 1
@@ -1232,7 +1272,7 @@ class VidluxProvider : MainAPI() {
         }
 
         val fetched = endpoints.amap { (providerLabel, url) ->
-            val resp = runCatching {
+            val resp = try {
                 app.get(
                     url,
                     headers = mapOf(
@@ -1241,17 +1281,31 @@ class VidluxProvider : MainAPI() {
                         "Referer" to "$sessionHost/",
                         "Origin" to sessionHost
                     ),
-                    timeout = 18L
+                    timeout = 45L
                 )
-            }.getOrNull() ?: return@amap emptyList<VidluxStreamItem>()
-
-            if (resp.code !in 200..299 || !resp.text.trimStart().startsWith("{")) {
+            } catch (ex: Exception) {
+                ClipboardLogger.logAndCopy("Spider ($providerLabel)", ex.message ?: "Request failed")
                 return@amap emptyList<VidluxStreamItem>()
             }
 
-            val json = runCatching { JSONObject(resp.text) }.getOrNull()
-                ?: return@amap emptyList<VidluxStreamItem>()
-            val sources = json.optJSONArray("sources") ?: return@amap emptyList<VidluxStreamItem>()
+            if (resp.code !in 200..299 || !resp.text.trimStart().startsWith("{")) {
+                ClipboardLogger.logAndCopy("Spider ($providerLabel)", "HTTP ${resp.code}: ${resp.text.take(120)}")
+                return@amap emptyList<VidluxStreamItem>()
+            }
+
+            val json = runCatching { JSONObject(resp.text) }.getOrNull() ?: run {
+                ClipboardLogger.logAndCopy("Spider ($providerLabel)", "JSON parse error")
+                return@amap emptyList<VidluxStreamItem>()
+            }
+            val sources = json.optJSONArray("sources")
+            if (sources == null || sources.length() == 0) {
+                val diagMsg = json.optJSONArray("diagnostics")?.optJSONObject(0)?.optString("message", "")?.trim().orEmpty()
+                ClipboardLogger.logAndCopy(
+                    "Spider ($providerLabel)",
+                    if (diagMsg.isNotBlank()) diagMsg.take(140) else "0 sources"
+                )
+                return@amap emptyList<VidluxStreamItem>()
+            }
 
             val caps = mutableListOf<Pair<String, String>>()
             val subsArr = json.optJSONArray("subtitles")
@@ -1284,34 +1338,66 @@ class VidluxProvider : MainAPI() {
                     unwrapped.url.contains("playmanifest", ignoreCase = true) ||
                     unwrapped.url.contains("/hls/", ignoreCase = true) ||
                     unwrapped.url.contains("vercetti.org", ignoreCase = true) ||
+                    unwrapped.url.contains("slowcloud.live", ignoreCase = true) ||
+                    unwrapped.url.contains("fastcloud.live", ignoreCase = true) ||
+                    unwrapped.url.contains("lucidmechanism", ignoreCase = true) ||
+                    unwrapped.url.contains("fcxmb.com", ignoreCase = true) ||
+                    unwrapped.url.contains("hscow.com", ignoreCase = true) ||
                     unwrapped.url.contains("1shows.app", ignoreCase = true)
                 val isMp4 = !isHls && (stType == "mp4" || stType == "mkv" ||
                     Regex("""\.(mp4|mkv|webm)(\?|$)""", RegexOption.IGNORE_CASE).containsMatchIn(unwrapped.url))
 
                 val hdrs = unwrapped.headers.toMutableMap()
                 if (providerLabel == "Vidrock") {
-                    hdrs["Referer"] = "https://vidrock.net/"
-                    hdrs["Origin"] = "https://vidrock.net"
+                    if (!hdrs.containsKey("Referer") && !hdrs.containsKey("referer")) {
+                        hdrs["Referer"] = "https://vidrock.net/"
+                    }
+                    if (!hdrs.containsKey("Origin") && !hdrs.containsKey("origin")) {
+                        hdrs["Origin"] = "https://vidrock.net"
+                    }
                 }
 
+                val mirrorName = src.optJSONObject("provider")?.optString("name", "")?.trim()?.ifBlank { providerLabel }
+                    ?: providerLabel
+                val (audioLbl, audioPrio) = classifyAudioTrack(src.optJSONArray("audioTracks"), originalLang)
+                val displaySub = if (audioLbl.isNotBlank()) "$mirrorName • $audioLbl" else mirrorName
                 val quality = src.optString("quality", "").ifBlank { "auto" }.trim()
+
                 items.add(
                     VidluxStreamItem(
                         serverId = if (providerLabel == "Vidrock") "vidrock" else "spider",
                         serverName = "Spider",
-                        subLabel = providerLabel,
+                        subLabel = displaySub,
                         fileUrl = unwrapped.url,
                         streamType = if (isMp4) "mp4" else if (isHls) "hls" else stType,
                         quality = quality,
                         headers = hdrs,
-                        builtInCaps = caps
+                        builtInCaps = caps,
+                        audioLabel = audioLbl,
+                        audioPriority = audioPrio
                     )
                 )
             }
             items
         }.flatten()
 
-        return fetched.distinctBy { it.fileUrl }.sortedBy { qualityRank(it.quality, it.streamType) }
+        val unique = fetched.distinctBy { it.fileUrl }
+        val hasPrimaryLang = unique.any { it.audioPriority == 0 }
+        val filtered = if (hasPrimaryLang) unique.filter { it.audioPriority <= 1 } else unique
+
+        return filtered
+            .withIndex()
+            .sortedWith(
+                compareBy<IndexedValue<VidluxStreamItem>>(
+                    { it.value.audioPriority },
+                    {
+                        val q = it.value.quality
+                        if (q.equals("auto", ignoreCase = true) || q.isBlank()) 1 else qualityRank(q, it.value.streamType)
+                    },
+                    { it.index }
+                )
+            )
+            .map { it.value }
     }
 
     // =========================================================================
@@ -1499,7 +1585,7 @@ class VidluxProvider : MainAPI() {
                         act?.addContentView(wv, ViewGroup.LayoutParams(w, h))
                     } catch (_: Exception) { }
 
-                    handler.postDelayed({ finish(null) }, 35_000L)
+                    handler.postDelayed({ finish(null) }, 50_000L)
                     wv.loadUrl(pageUrl, mapOf("Referer" to refererUrl))
                 } catch (e: Exception) {
                     ClipboardLogger.logAndCopy("WebView Err", e.stackTraceToString().take(600))
@@ -1613,7 +1699,7 @@ class VidluxProvider : MainAPI() {
             val probeHdrs = if (isMp4) cand.headers + ("Range" to "bytes=0-1023") else cand.headers
 
             val outcome = runCatching {
-                val resp = app.get(cand.url, headers = probeHdrs, timeout = 8L)
+                val resp = app.get(cand.url, headers = probeHdrs, timeout = 12L)
                 lastCode = resp.code
                 if (resp.code !in 200..299) {
                     return@runCatching null
@@ -1751,10 +1837,12 @@ class VidluxProvider : MainAPI() {
         var imdbId = imdbCache[ref.tmdbId] ?: ""
         var mediaTitle = ""
         var mediaYear: Int? = null
+        var origLang = ""
         val details = tmdbGet("/${ref.type}/${ref.tmdbId}?append_to_response=external_ids")
         if (details != null) {
             mediaTitle = details.optString(if (ref.type == "tv") "name" else "title", "").trim()
             mediaYear = parseYear(details.optString(if (ref.type == "tv") "first_air_date" else "release_date", ""))
+            origLang = details.optString("original_language", "").trim()
             if (imdbId.isBlank()) {
                 imdbId = details.optString("imdb_id", "").ifBlank {
                     details.optJSONObject("external_ids")?.optString("imdb_id", "") ?: ""
@@ -1768,7 +1856,7 @@ class VidluxProvider : MainAPI() {
         var subCount = fetchSubtitleList(ref, imdbId, subtitleCallback)
         val seenSubUrls = HashSet<String>()
 
-        // 2. Tier 1: Lấy requestToken từ trang embed Vidlux và trích xuất tuần tự (kèm nhánh Spider 02pcembed của player)
+        // 2. Tier 1: Lấy requestToken từ trang embed Vidlux và trích xuất (chạy song song nhánh Spider 02pcembed với timeout 45s)
         var emittedLinks = 0
         val emittedUrls = HashSet<String>()
 
@@ -1780,34 +1868,45 @@ class VidluxProvider : MainAPI() {
 
             var workingServers = 0
             for ((serverId, serverName) in VIDLUX_SERVERS) {
-                if (emittedLinks >= 4 || workingServers >= 2) break
+                if (emittedLinks >= 3 || workingServers >= 2) break
 
-                val res = fetchVidluxServerStreams(
-                    session = session,
-                    ref = ref,
-                    serverId = serverId,
-                    serverName = serverName,
-                    title = mediaTitle,
-                    year = mediaYear
-                )
+                val res: ServerFetchResult
+                val effectiveItems: List<VidluxStreamItem>
 
-                val effectiveItems = if (serverId == "spider") {
-                    val hasPrimary = res.items.any {
-                        it.subLabel in setOf("Afrilix", "Vidrock", "KissCam", "KissAsia", "KissAsia MP4", "Alpha 2", "VidNest", "Catflix")
-                    }
-                    if (res.items.isEmpty() || !hasPrimary) {
-                        val browserItems = fetchVidluxBrowserSpider(session.host, ref)
-                        if (browserItems.isNotEmpty()) {
-                            ClipboardLogger.logAndCopy("Spider (Browser)", "Tìm thấy ${browserItems.size} nguồn từ 02pcembed")
-                            (browserItems + res.items).distinctBy { it.fileUrl }
+                if (serverId == "spider") {
+                    val pair = listOf(0, 1).amap { branch ->
+                        if (branch == 0) {
+                            fetchVidluxServerStreams(
+                                session = session,
+                                ref = ref,
+                                serverId = serverId,
+                                serverName = serverName,
+                                title = mediaTitle,
+                                year = mediaYear,
+                                timeoutSec = 20L
+                            ) to emptyList<VidluxStreamItem>()
                         } else {
-                            res.items
+                            null to fetchVidluxBrowserSpider(session.host, ref, origLang)
                         }
+                    }
+                    res = pair[0].first ?: ServerFetchResult(0, false, emptyList(), "Spider failed")
+                    val browserItems = pair[1].second
+                    if (browserItems.isNotEmpty()) {
+                        ClipboardLogger.logAndCopy("Spider (Browser)", "Tìm thấy ${browserItems.size} nguồn từ 02pcembed")
+                        effectiveItems = (browserItems + res.items).distinctBy { it.fileUrl }
                     } else {
-                        res.items
+                        effectiveItems = res.items
                     }
                 } else {
-                    res.items
+                    res = fetchVidluxServerStreams(
+                        session = session,
+                        ref = ref,
+                        serverId = serverId,
+                        serverName = serverName,
+                        title = mediaTitle,
+                        year = mediaYear
+                    )
+                    effectiveItems = res.items
                 }
 
                 if (res.rateLimited && effectiveItems.isEmpty()) {
@@ -1828,7 +1927,7 @@ class VidluxProvider : MainAPI() {
                             subCount++
                         }
                     }
-                    if (serverLive >= 3 || emittedLinks >= 4) break
+                    if (serverLive >= 3 || emittedLinks >= 3) break
                     if (verifyAndEmitLink(session.host, session.embedUrl, item, emittedUrls, callback)) {
                         serverLive++
                         emittedLinks++
@@ -1841,7 +1940,7 @@ class VidluxProvider : MainAPI() {
             }
         }
 
-        // 3. Tier 2: WebView Sniffer trực tiếp trên trang embed của Vidlux (bơm TMDB + preview=1 chống kẹt ở VN)
+        // 3. Tier 2: WebView Sniffer trực tiếp trên trang embed của Vidlux (chỉ định server=spider + bơm TMDB + preview=1)
         if (emittedLinks == 0) {
             val activeHost = session?.host ?: VIDLUX_HOSTS.first()
             val pathSuffix = if (ref.type == "tv") {
@@ -1849,13 +1948,13 @@ class VidluxProvider : MainAPI() {
             } else {
                 "/embed/movie/${ref.tmdbId}"
             }
-            val wvUrl = "$activeHost$pathSuffix?autoplay=true&preview=1"
+            val wvUrl = "$activeHost$pathSuffix?server=spider&autoplay=true&preview=1"
             ClipboardLogger.logAndCopy("WebView", "Sniff Vidlux: $wvUrl")
             val seenReqs = mutableListOf<String>()
             val sniffed = sniffVidluxWebView(wvUrl, "$activeHost/", details?.toString(), seenReqs)
 
             if (sniffed == null) {
-                val sample = seenReqs.take(8).joinToString(" | ")
+                val sample = seenReqs.take(15).joinToString(" | ")
                 ClipboardLogger.logAndCopy("WebView Miss", "Không bắt được luồng (${seenReqs.size} reqs): $sample")
             } else {
                 for (subUrl in sniffed.subs) {
