@@ -2,6 +2,7 @@ package com.vidzen
 
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.utils.SubtitleHelper // <-- ĐÃ THÊM IMPORT NÀY
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
@@ -102,7 +103,6 @@ object SubtitleFetcher {
         }
     }
 
-    // HÀM ĐÃ ĐƯỢC SỬA LỖI TẠI ĐÂY
     private suspend fun getOpenSubtitlesDownloadUrl(fileId: Int): String? {
         return try {
             val jsonBody = """{"file_id": $fileId}"""
@@ -112,7 +112,6 @@ object SubtitleFetcher {
                     "Api-Key" to OPENSUBTITLES_API_KEY,
                     "Content-Type" to "application/json"
                 ),
-                // Sử dụng requestBody thay vì data cho raw JSON
                 requestBody = jsonBody.toRequestBody("application/json".toMediaType())
             ).text
             JSONObject(response).optString("link", null)
