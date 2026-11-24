@@ -1117,7 +1117,7 @@ class VidluxProvider : MainAPI() {
         serverName: String,
         title: String,
         year: Int?,
-        timeoutSec: Long = if (serverId == "spider") 20L else 10L
+        timeoutSec: Long = if (serverId == "spider") 30L else 10L
     ): ServerFetchResult {
         val q = StringBuilder("id=${ref.tmdbId}&type=${ref.type}&_t=${URLEncoder.encode(session.requestToken, "UTF-8")}")
         if (ref.type == "tv") {
@@ -1281,7 +1281,7 @@ class VidluxProvider : MainAPI() {
                         "Referer" to "$sessionHost/",
                         "Origin" to sessionHost
                     ),
-                    timeout = 45L
+                    timeout = 95L
                 )
             } catch (ex: Exception) {
                 ClipboardLogger.logAndCopy("Spider ($providerLabel)", ex.message ?: "Request failed")
@@ -1585,7 +1585,7 @@ class VidluxProvider : MainAPI() {
                         act?.addContentView(wv, ViewGroup.LayoutParams(w, h))
                     } catch (_: Exception) { }
 
-                    handler.postDelayed({ finish(null) }, 50_000L)
+                    handler.postDelayed({ finish(null) }, 110_000L)
                     wv.loadUrl(pageUrl, mapOf("Referer" to refererUrl))
                 } catch (e: Exception) {
                     ClipboardLogger.logAndCopy("WebView Err", e.stackTraceToString().take(600))
@@ -1856,7 +1856,7 @@ class VidluxProvider : MainAPI() {
         var subCount = fetchSubtitleList(ref, imdbId, subtitleCallback)
         val seenSubUrls = HashSet<String>()
 
-        // 2. Tier 1: Lấy requestToken từ trang embed Vidlux và trích xuất (chạy song song nhánh Spider 02pcembed với timeout 45s)
+        // 2. Tier 1: Lấy requestToken từ trang embed Vidlux và trích xuất (chạy song song nhánh Spider 02pcembed với timeout 95s)
         var emittedLinks = 0
         val emittedUrls = HashSet<String>()
 
@@ -1883,7 +1883,7 @@ class VidluxProvider : MainAPI() {
                                 serverName = serverName,
                                 title = mediaTitle,
                                 year = mediaYear,
-                                timeoutSec = 20L
+                                timeoutSec = 30L
                             ) to emptyList<VidluxStreamItem>()
                         } else {
                             null to fetchVidluxBrowserSpider(session.host, ref, origLang)
