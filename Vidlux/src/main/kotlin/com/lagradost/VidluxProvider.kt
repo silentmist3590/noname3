@@ -63,22 +63,22 @@ class VidluxProvider : MainAPI() {
             "https://vidlux.top"
         )
 
-        // Thứ tự server chính thức của VidLux (ưu tiên server ổn định, phản hồi nhanh trước)
+        // Thứ tự server chính thức của VidLux (theo chuẩn player e6, ưu tiên spider có thêm nhánh browser-extract)
         private val VIDLUX_SERVERS = listOf(
             "spider" to "Spider",
             "robot" to "Robot",
             "titan" to "Titan",
             "dragon" to "Dragon",
-            "vidrock" to "Nova",
+            "quasar" to "Quasar",
+            "vidfast" to "Flux",
             "rocket" to "Aether",
             "star" to "Star",
             "bolt" to "Bolt",
             "quilox" to "Quilox",
-            "quasar" to "Quasar",
-            "vidfast" to "Flux",
-            "vixsrc" to "Aura",
-            "magic" to "Magic",
+            "vidrock" to "Nova",
             "dubai" to "Dubai",
+            "magic" to "Magic",
+            "vixsrc" to "Aura",
             "astra" to "Astra"
         )
     }
@@ -947,19 +947,89 @@ class VidluxProvider : MainAPI() {
         return appendSubExtFragment(absVidluxUrl(host, clean), "vtt")
     }
 
+    private fun isJunkStreamUrl(url: String): Boolean {
+        val lower = url.lowercase()
+        if (lower.contains("lizer123.site")) return true
+        return Regex(
+            """(?:^|[/_.-])(onlyfans|xnxx|xvideos|pornhub|xhamster|spankbang|redtube|youporn|hentai|rule34)(?:[/_.-]|$)""",
+            RegexOption.IGNORE_CASE
+        ).containsMatchIn(lower)
+    }
+
+    private data class UnwrappedProxy(
+        val url: String,
+        val headers: Map<String, String>
+    )
+
+    private fun unwrapVidluxProxyUrl(rawUrl: String, baseHeaders: Map<String, String> = emptyMap()): UnwrappedProxy {
+        var current = rawUrl.trim()
+        val hdrs = baseHeaders.toMutableMap()
+        for (hop in 0 until 4) {
+            if (current.contains("/api/pcembed-media?", ignoreCase = true) ||
+                current.contains("/api/moviesnow-proxy?", ignoreCase = true) ||
+                current.contains(".workers.dev/proxy", ignoreCase = true) ||
+                current.contains("animanga.fun", ignoreCase = true) && current.contains("/proxy", ignoreCase = true)
+            ) {
+                val inner = Regex("""[?&]url=([^&]+)""").find(current)?.groupValues?.getOrNull(1)?.let {
+                    runCatching { URLDecoder.decode(it, "UTF-8") }.getOrNull()
+                }
+                if (!inner.isNullOrBlank() && inner.startsWith("http", ignoreCase = true)) {
+                    current = inner
+                    continue
+                }
+            }
+            if (current.contains("02pcembed.site/v1/proxy", ignoreCase = true)) {
+                val rawData = Regex("""[?&]data=([^&]+)""").find(current)?.groupValues?.getOrNull(1)
+                if (!rawData.isNullOrBlank()) {
+                    val decodedCandidates = listOfNotNull(
+                        runCatching { URLDecoder.decode(rawData, "UTF-8") }.getOrNull(),
+                        rawData
+                    )
+                    var unwrapped = false
+                    for (candStr in decodedCandidates) {
+                        val json = runCatching { JSONObject(candStr) }.getOrNull() ?: continue
+                        val innerUrl = json.optString("url", "").trim()
+                        if (innerUrl.startsWith("http", ignoreCase = true)) {
+                            json.optJSONObject("headers")?.let { hj ->
+                                val keys = hj.keys()
+                                while (keys.hasNext()) {
+                                    val k = keys.next()
+                                    val v = hj.optString(k, "").trim()
+                                    if (k.isNotBlank() && v.isNotBlank()) hdrs[k] = v
+                                }
+                            }
+                            current = innerUrl
+                            unwrapped = true
+                            break
+                        }
+                    }
+                    if (unwrapped) continue
+                }
+            }
+            break
+        }
+        return UnwrappedProxy(current, hdrs)
+    }
+
     private fun inferUpstreamReferer(serverId: String, streamUrl: String, streamHeaders: Map<String, String>): String {
         streamHeaders["Referer"]?.takeIf { it.startsWith("http") }?.let { return it }
         streamHeaders["referer"]?.takeIf { it.startsWith("http") }?.let { return it }
         val lower = streamUrl.lowercase()
         return when {
             lower.contains("afrilix.com") || lower.contains("playmanifest") -> "https://www.afrilix.com/"
-            lower.contains("vidrock.net") || lower.contains("1shows.app") || lower.contains("47qzoobg8k") || serverId == "vidrock" -> "https://vidrock.net/"
+            lower.contains("vidrock.net") || lower.contains("1shows.app") || lower.contains("47qzoobg8k") ||
+                lower.contains("vercetti.org") || lower.contains("slowcloud.live") || lower.contains("fastcloud.live") ||
+                Regex("""\borion\d*\.""").containsMatchIn(lower) || serverId == "vidrock" -> "https://vidrock.net/"
             lower.contains("vidfast.vc") || serverId == "vidfast" -> "https://vidfast.vc/"
             lower.contains("vixsrc.to") || serverId == "vixsrc" -> "https://vixsrc.to/"
+            lower.contains("vidlink.pro") -> "https://vidlink.pro/"
+            lower.contains("jenks426set") || lower.contains("gemma416okl") -> "https://gemma416okl.com/"
             lower.contains("vidzee.wtf") || serverId == "astra" -> "https://player.vidzee.wtf/"
             lower.contains("kissasia.cam") || lower.contains("zudrama.top") || lower.contains("dramasub.top") -> "https://kissasia.cam/"
             lower.contains("hakunaymatata") || lower.contains("hakunamatata") -> "https://fmoviesunblocked.net/"
-            lower.contains("vidnest.fun") || lower.contains("animanga.fun") -> "https://vidnest.fun/"
+            lower.contains("vidnest.fun") || lower.contains("pwcloud.animanga.fun") ||
+                lower.contains("packingmolters.cfd") || lower.contains("streamflixserver") -> "https://vidnest.fun/"
+            lower.contains("animanga.fun") || lower.contains("tiktoks.") -> "https://tiktoks.animanga.fun/"
             else -> Regex("""^(https?://[^/]+)""").find(streamUrl)?.groupValues?.getOrNull(1)?.let { "$it/" }
                 ?: "https://vidlux.xyz/"
         }
@@ -1064,7 +1134,7 @@ class VidluxProvider : MainAPI() {
                     "Origin" to session.host,
                     "Accept" to "application/json, text/plain, */*"
                 ),
-                timeout = 14L
+                timeout = 10L
             )
         }.getOrElse { ex ->
             return ServerFetchResult(0, false, emptyList(), ex.message ?: "Request failed")
@@ -1141,8 +1211,111 @@ class VidluxProvider : MainAPI() {
         return ServerFetchResult(resp.code, false, sorted, err)
     }
 
+    // Nhánh client-side Spider chính thức của VidLux (port đúng hàm eJ/eQ/eY trong player JS)
+    // Không tốn quota rate-limit của vidlux.xyz
+    private suspend fun fetchVidluxBrowserSpider(
+        sessionHost: String,
+        ref: MediaRef
+    ): List<VidluxStreamItem> {
+        val endpoints = if (ref.type == "tv") {
+            val s = ref.season ?: 1
+            val e = ref.episode ?: 1
+            listOf(
+                "KissAsia" to "https://02pcembed.site/v1/kissasia/tv/${ref.tmdbId}/seasons/$s/episodes/$e",
+                "Vidrock" to "https://02pcembed.site/v1/vidrock/tv/${ref.tmdbId}/seasons/$s/episodes/$e"
+            )
+        } else {
+            listOf(
+                "Afrilix" to "https://02pcembed.site/v1/afrilix/movies/${ref.tmdbId}",
+                "Vidrock" to "https://02pcembed.site/v1/vidrock/movies/${ref.tmdbId}"
+            )
+        }
+
+        val fetched = endpoints.amap { (providerLabel, url) ->
+            val resp = runCatching {
+                app.get(
+                    url,
+                    headers = mapOf(
+                        "User-Agent" to ua,
+                        "Accept" to "application/json, text/plain;q=0.9, */*;q=0.8",
+                        "Referer" to "$sessionHost/",
+                        "Origin" to sessionHost
+                    ),
+                    timeout = 18L
+                )
+            }.getOrNull() ?: return@amap emptyList<VidluxStreamItem>()
+
+            if (resp.code !in 200..299 || !resp.text.trimStart().startsWith("{")) {
+                return@amap emptyList<VidluxStreamItem>()
+            }
+
+            val json = runCatching { JSONObject(resp.text) }.getOrNull()
+                ?: return@amap emptyList<VidluxStreamItem>()
+            val sources = json.optJSONArray("sources") ?: return@amap emptyList<VidluxStreamItem>()
+
+            val caps = mutableListOf<Pair<String, String>>()
+            val subsArr = json.optJSONArray("subtitles")
+            if (subsArr != null) {
+                for (i in 0 until subsArr.length()) {
+                    val sub = subsArr.optJSONObject(i) ?: continue
+                    val rawSub = sub.optString("url", "").ifBlank { sub.optString("file", "") }.trim()
+                    val subLabel = sub.optString("label", "").ifBlank { sub.optString("language", "Subtitle") }.trim()
+                    val norm = normalizeVidluxCaptionUrl(sessionHost, rawSub) ?: continue
+                    caps.add(subLabel to norm)
+                }
+            }
+
+            val items = mutableListOf<VidluxStreamItem>()
+            for (i in 0 until sources.length()) {
+                val src = sources.optJSONObject(i) ?: continue
+                val rawUrl = src.optString("url", "").trim()
+                if (rawUrl.isBlank() || isJunkStreamUrl(rawUrl)) continue
+
+                val unwrapped = unwrapVidluxProxyUrl(rawUrl)
+                if (unwrapped.url.contains("02pcembed.site", ignoreCase = true) ||
+                    isJunkStreamUrl(unwrapped.url)
+                ) {
+                    continue
+                }
+
+                val stType = src.optString("type", "").lowercase().trim()
+                val isHls = stType == "hls" ||
+                    unwrapped.url.contains(".m3u8", ignoreCase = true) ||
+                    unwrapped.url.contains("playmanifest", ignoreCase = true) ||
+                    unwrapped.url.contains("/hls/", ignoreCase = true) ||
+                    unwrapped.url.contains("vercetti.org", ignoreCase = true) ||
+                    unwrapped.url.contains("1shows.app", ignoreCase = true)
+                val isMp4 = !isHls && (stType == "mp4" || stType == "mkv" ||
+                    Regex("""\.(mp4|mkv|webm)(\?|$)""", RegexOption.IGNORE_CASE).containsMatchIn(unwrapped.url))
+
+                val hdrs = unwrapped.headers.toMutableMap()
+                if (providerLabel == "Vidrock") {
+                    hdrs["Referer"] = "https://vidrock.net/"
+                    hdrs["Origin"] = "https://vidrock.net"
+                }
+
+                val quality = src.optString("quality", "").ifBlank { "auto" }.trim()
+                items.add(
+                    VidluxStreamItem(
+                        serverId = if (providerLabel == "Vidrock") "vidrock" else "spider",
+                        serverName = "Spider",
+                        subLabel = providerLabel,
+                        fileUrl = unwrapped.url,
+                        streamType = if (isMp4) "mp4" else if (isHls) "hls" else stType,
+                        quality = quality,
+                        headers = hdrs,
+                        builtInCaps = caps
+                    )
+                )
+            }
+            items
+        }.flatten()
+
+        return fetched.distinctBy { it.fileUrl }.sortedBy { qualityRank(it.quality, it.streamType) }
+    }
+
     // =========================================================================
-    // WebView Fallback Sniffer (chỉ dùng khi Direct API Vidlux bị 429 hoặc đổi cơ chế)
+    // WebView Fallback Sniffer (chỉ dùng khi Direct API Vidlux fail)
     // =========================================================================
 
     private data class SniffResult(
@@ -1155,6 +1328,7 @@ class VidluxProvider : MainAPI() {
     private suspend fun sniffVidluxWebView(
         pageUrl: String,
         refererUrl: String,
+        tmdbJsonText: String?,
         seenRequests: MutableList<String>
     ): SniffResult? {
         return suspendCoroutine { cont ->
@@ -1188,7 +1362,7 @@ class VidluxProvider : MainAPI() {
                     }
 
                     val streamRegex = Regex(
-                        """\.m3u8|\.mpd|master\.txt|playManifest|/pl/[A-Za-z0-9_-]{30,}|/pli/[A-Za-z0-9_-]{30,}|/plc/[A-Za-z0-9_-]{30,}|/api/(?:vixsrc-proxy|robot-proxy|dragon-proxy|moviesnow-proxy|moviebox-proxy|moviebox-play|dubai-proxy|relay|pcembed-media)\b""",
+                        """\.m3u8|\.mpd|master\.txt|playManifest|/pl/[A-Za-z0-9_-]{30,}|/pli/[A-Za-z0-9_-]{30,}|/plc/[A-Za-z0-9_-]{30,}|/api/(?:vixsrc-proxy|robot-proxy|dragon-proxy|moviesnow-proxy|moviebox-proxy|moviebox-play|dubai-proxy|relay|pcembed-media)\b|02pcembed\.site/v1/proxy""",
                         RegexOption.IGNORE_CASE
                     )
                     val mp4Regex = Regex("""\.mp4(\?|$|#)|\.mkv(\?|$|#)""", RegexOption.IGNORE_CASE)
@@ -1253,6 +1427,19 @@ class VidluxProvider : MainAPI() {
                         ): WebResourceResponse? {
                             val u = request?.url?.toString() ?: return null
                             if (!u.startsWith("http", ignoreCase = true)) return null
+
+                            // VidLux chờ api.themoviedb.org trả về mới bật cờ gọi extract; ở VN bị chặn DNS nên trả luôn JSON từ TMDB Proxy
+                            if (u.contains("api.themoviedb.org/3/", ignoreCase = true) && !tmdbJsonText.isNullOrBlank()) {
+                                val bytes = tmdbJsonText.toByteArray(Charsets.UTF_8)
+                                return WebResourceResponse(
+                                    "application/json",
+                                    "utf-8",
+                                    200,
+                                    "OK",
+                                    mapOf("Access-Control-Allow-Origin" to "*"),
+                                    ByteArrayInputStream(bytes)
+                                )
+                            }
 
                             if (blockedWebViewDomains.any { u.contains(it, ignoreCase = true) }) {
                                 return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
@@ -1347,7 +1534,9 @@ class VidluxProvider : MainAPI() {
         streamHeaders: Map<String, String>
     ): List<ProbeCandidate> {
         val candidates = mutableListOf<ProbeCandidate>()
-        val resolved = absVidluxUrl(vidluxHost, rawUrl)
+        val unwrapped = unwrapVidluxProxyUrl(absVidluxUrl(vidluxHost, rawUrl), streamHeaders)
+        val resolved = unwrapped.url
+        val effHeaders = unwrapped.headers
         val isVidluxProxy = resolved.startsWith("$vidluxHost/api/", ignoreCase = true) ||
             resolved.contains("/api/vixsrc-proxy", ignoreCase = true) ||
             resolved.contains("/api/robot-proxy", ignoreCase = true) ||
@@ -1370,9 +1559,9 @@ class VidluxProvider : MainAPI() {
         }
 
         // 1. Direct stream URL với header trả về từ server / suy luận từ upstream
-        val upstreamRef = inferUpstreamReferer(serverId, resolved, streamHeaders)
+        val upstreamRef = inferUpstreamReferer(serverId, resolved, effHeaders)
         val upstreamOrigin = upstreamRef.trimEnd('/')
-        val directHeaders = streamHeaders.toMutableMap().apply {
+        val directHeaders = effHeaders.toMutableMap().apply {
             put("User-Agent", ua)
             put("Referer", upstreamRef)
             put("Origin", upstreamOrigin)
@@ -1380,7 +1569,7 @@ class VidluxProvider : MainAPI() {
         candidates.add(ProbeCandidate(resolved, directHeaders))
 
         // 2. Direct stream URL không kèm Referer/Origin (một số CDN MP4 chặn Referer lạ)
-        val noRefHeaders = streamHeaders.toMutableMap().apply {
+        val noRefHeaders = effHeaders.toMutableMap().apply {
             put("User-Agent", ua)
             remove("Referer")
             remove("referer")
@@ -1404,6 +1593,10 @@ class VidluxProvider : MainAPI() {
         } else {
             val vixProxy = "$vidluxHost/api/vixsrc-proxy?referer=${URLEncoder.encode(upstreamRef, "UTF-8")}&url=${URLEncoder.encode(resolved, "UTF-8")}"
             candidates.add(ProbeCandidate(vixProxy, vlxHeaders))
+        }
+
+        if (rawUrl != resolved && rawUrl.contains("02pcembed.site/v1/proxy", ignoreCase = true)) {
+            candidates.add(ProbeCandidate(absVidluxUrl(vidluxHost, rawUrl), noRefHeaders))
         }
 
         return candidates.distinctBy { it.url to it.headers }
@@ -1575,7 +1768,7 @@ class VidluxProvider : MainAPI() {
         var subCount = fetchSubtitleList(ref, imdbId, subtitleCallback)
         val seenSubUrls = HashSet<String>()
 
-        // 2. Tier 1: Lấy requestToken từ trang embed Vidlux và gọi API /api/extract/{server} tuần tự (tránh 429)
+        // 2. Tier 1: Lấy requestToken từ trang embed Vidlux và trích xuất tuần tự (kèm nhánh Spider 02pcembed của player)
         var emittedLinks = 0
         val emittedUrls = HashSet<String>()
 
@@ -1586,10 +1779,8 @@ class VidluxProvider : MainAPI() {
             ClipboardLogger.logAndCopy("Session", "Host: ${session.host} | Embed: ${session.embedUrl}")
 
             var workingServers = 0
-            var triedCount = 0
             for ((serverId, serverName) in VIDLUX_SERVERS) {
-                if (emittedLinks >= 4 || workingServers >= 2 || triedCount >= 8) break
-                triedCount++
+                if (emittedLinks >= 4 || workingServers >= 2) break
 
                 val res = fetchVidluxServerStreams(
                     session = session,
@@ -1600,18 +1791,37 @@ class VidluxProvider : MainAPI() {
                     year = mediaYear
                 )
 
-                if (res.rateLimited) {
+                val effectiveItems = if (serverId == "spider") {
+                    val hasPrimary = res.items.any {
+                        it.subLabel in setOf("Afrilix", "Vidrock", "KissCam", "KissAsia", "KissAsia MP4", "Alpha 2", "VidNest", "Catflix")
+                    }
+                    if (res.items.isEmpty() || !hasPrimary) {
+                        val browserItems = fetchVidluxBrowserSpider(session.host, ref)
+                        if (browserItems.isNotEmpty()) {
+                            ClipboardLogger.logAndCopy("Spider (Browser)", "Tìm thấy ${browserItems.size} nguồn từ 02pcembed")
+                            (browserItems + res.items).distinctBy { it.fileUrl }
+                        } else {
+                            res.items
+                        }
+                    } else {
+                        res.items
+                    }
+                } else {
+                    res.items
+                }
+
+                if (res.rateLimited && effectiveItems.isEmpty()) {
                     ClipboardLogger.logAndCopy("RateLimit ($serverName)", res.errorMsg)
                     break
                 }
 
-                if (res.items.isEmpty()) {
+                if (effectiveItems.isEmpty()) {
                     ClipboardLogger.logAndCopy("Skip ($serverName)", res.errorMsg)
                     continue
                 }
 
                 var serverLive = 0
-                for (item in res.items) {
+                for (item in effectiveItems) {
                     for ((capLabel, capUrl) in item.builtInCaps) {
                         if (seenSubUrls.add(capUrl)) {
                             subtitleCallback.invoke(SubtitleFile("Vidlux • $capLabel", capUrl))
@@ -1627,10 +1837,11 @@ class VidluxProvider : MainAPI() {
                 if (serverLive > 0) {
                     workingServers++
                 }
+                if (res.rateLimited) break
             }
         }
 
-        // 3. Tier 2: WebView Sniffer trực tiếp trên trang embed của Vidlux nếu Tier 1 chưa có link sống
+        // 3. Tier 2: WebView Sniffer trực tiếp trên trang embed của Vidlux (bơm TMDB + preview=1 chống kẹt ở VN)
         if (emittedLinks == 0) {
             val activeHost = session?.host ?: VIDLUX_HOSTS.first()
             val pathSuffix = if (ref.type == "tv") {
@@ -1638,13 +1849,14 @@ class VidluxProvider : MainAPI() {
             } else {
                 "/embed/movie/${ref.tmdbId}"
             }
-            val wvUrl = "$activeHost$pathSuffix?autoplay=true"
+            val wvUrl = "$activeHost$pathSuffix?autoplay=true&preview=1"
             ClipboardLogger.logAndCopy("WebView", "Sniff Vidlux: $wvUrl")
             val seenReqs = mutableListOf<String>()
-            val sniffed = sniffVidluxWebView(wvUrl, "$activeHost/", seenReqs)
+            val sniffed = sniffVidluxWebView(wvUrl, "$activeHost/", details?.toString(), seenReqs)
 
             if (sniffed == null) {
-                ClipboardLogger.logAndCopy("WebView Miss", "Không bắt được luồng (${seenReqs.size} reqs)")
+                val sample = seenReqs.take(8).joinToString(" | ")
+                ClipboardLogger.logAndCopy("WebView Miss", "Không bắt được luồng (${seenReqs.size} reqs): $sample")
             } else {
                 for (subUrl in sniffed.subs) {
                     if (seenSubUrls.add(subUrl)) {
