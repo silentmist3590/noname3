@@ -11,6 +11,8 @@ include(":Vidspark")
 include(":Tvhay")
 include(":Vidlux")
 include(":Vidnet")
+include(":Vidzen")
+
 
 
 pluginManagement {
