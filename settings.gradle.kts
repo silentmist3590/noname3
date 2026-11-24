@@ -9,7 +9,7 @@ include(":Vidup")
 include(":Vidcore")
 include(":Vidspark")
 include(":Tvhay")
-
+include(":Vidlux")
 
 pluginManagement {
     repositories {
