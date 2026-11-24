@@ -10,6 +10,8 @@ include(":Vidcore")
 include(":Vidspark")
 include(":Tvhay")
 include(":Vidlux")
+include(":Vidnet")
+
 
 pluginManagement {
     repositories {
