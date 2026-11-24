@@ -64,24 +64,25 @@ class VidluxProvider : MainAPI() {
             "https://vidlux.top"
         )
 
-        // Thứ tự server chính thức của VidLux: ưu tiên server phản hồi nhanh (<2-8s) trước,
-        // trong khi nhánh Spider (02pcembed) chạy song song ngầm ngay từ t=0 để không chặn các server khác
+        // Thứ tự server chính thức của VidLux: ưu tiên server ổn định & phản hồi nhanh lên đầu
+        // để giảm tối đa số request /api/extract/* và tránh chạm rate-limit 429 của VidLux;
+        // nhánh Spider (02pcembed) chạy song song ngầm ngay từ t=0
         private val VIDLUX_SERVERS = listOf(
-            "robot" to "Robot",
-            "titan" to "Titan",
-            "dragon" to "Dragon",
-            "vidfast" to "Flux",
             "vixsrc" to "Aura",
             "astra" to "Astra",
             "vidrock" to "Nova",
             "dubai" to "Dubai",
             "quasar" to "Quasar",
-            "rocket" to "Aether",
             "quilox" to "Quilox",
+            "bolt" to "Bolt",
+            "magic" to "Magic",
             "spider" to "Spider",
             "star" to "Star",
-            "bolt" to "Bolt",
-            "magic" to "Magic"
+            "rocket" to "Aether",
+            "dragon" to "Dragon",
+            "robot" to "Robot",
+            "titan" to "Titan",
+            "vidfast" to "Flux"
         )
     }
 
@@ -1124,10 +1125,9 @@ class VidluxProvider : MainAPI() {
 
     private fun defaultTimeoutForServer(serverId: String): Long {
         return when (serverId) {
-            "spider" -> 15L
-            "rocket", "quilox" -> 12L
-            "star", "bolt", "magic" -> 8L
-            else -> 9L
+            "spider" -> 18L
+            "rocket", "quilox", "star", "bolt", "magic" -> 14L
+            else -> 10L
         }
     }
 
@@ -1494,45 +1494,62 @@ class VidluxProvider : MainAPI() {
 
         for ((providerLabel, url) in endpoints) {
             Thread {
-                var conn: HttpURLConnection? = null
                 var parsed = emptyList<VidluxStreamItem>()
                 try {
-                    if (!handle.isCancelled()) {
-                        val c = (URL(url).openConnection() as HttpURLConnection).apply {
-                            instanceFollowRedirects = true
-                            connectTimeout = 12_000
-                            readTimeout = 60_000
-                            requestMethod = "GET"
-                            setRequestProperty("User-Agent", ua)
-                            setRequestProperty("Accept", "application/json, text/plain;q=0.9, */*;q=0.8")
-                            setRequestProperty("Referer", "$sessionHost/")
-                            setRequestProperty("Origin", sessionHost)
-                        }
-                        conn = c
-                        handle.registerConn(c)
-                        val code = c.responseCode
-                        val body = runCatching {
-                            val stream = if (code in 200..299) c.inputStream else (c.errorStream ?: c.inputStream)
-                            stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
-                        }.getOrDefault("")
+                    for (attempt in 0 until 2) {
+                        if (handle.isCancelled()) break
+                        var conn: HttpURLConnection? = null
+                        var shouldRetry = false
+                        try {
+                            val c = (URL(url).openConnection() as HttpURLConnection).apply {
+                                instanceFollowRedirects = true
+                                connectTimeout = 12_000
+                                readTimeout = 60_000
+                                requestMethod = "GET"
+                                setRequestProperty("User-Agent", ua)
+                                setRequestProperty("Accept", "application/json, text/plain;q=0.9, */*;q=0.8")
+                                setRequestProperty("Referer", "$sessionHost/")
+                                setRequestProperty("Origin", sessionHost)
+                            }
+                            conn = c
+                            handle.registerConn(c)
+                            val code = c.responseCode
+                            val body = runCatching {
+                                val stream = if (code in 200..299) c.inputStream else (c.errorStream ?: c.inputStream)
+                                stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+                            }.getOrDefault("")
 
-                        if (!handle.isCancelled()) {
+                            if (handle.isCancelled()) break
+
                             if (code in 200..299 && body.trimStart().startsWith("{")) {
                                 parsed = parsePcembedSourcesJson(sessionHost, providerLabel, body, originalLang)
+                                break
+                            } else if ((code == 500 || code == 502 || code == 504) && attempt == 0) {
+                                shouldRetry = true
                             } else {
                                 ClipboardLogger.logAndCopy("Spider ($providerLabel)", "HTTP $code: ${body.take(120)}")
+                                break
+                            }
+                        } catch (ex: Exception) {
+                            if (handle.isCancelled()) break
+                            if (attempt == 0) {
+                                shouldRetry = true
+                            } else {
+                                ClipboardLogger.logAndCopy("Spider ($providerLabel)", ex.message ?: "Request failed")
+                            }
+                        } finally {
+                            conn?.let {
+                                handle.unregisterConn(it)
+                                runCatching { it.disconnect() }
                             }
                         }
-                    }
-                } catch (ex: Exception) {
-                    if (!handle.isCancelled()) {
-                        ClipboardLogger.logAndCopy("Spider ($providerLabel)", ex.message ?: "Request failed")
+                        if (shouldRetry && !handle.isCancelled()) {
+                            runCatching { Thread.sleep(1500) }
+                        } else {
+                            break
+                        }
                     }
                 } finally {
-                    conn?.let {
-                        handle.unregisterConn(it)
-                        runCatching { it.disconnect() }
-                    }
                     handle.addResult(parsed)
                 }
             }.apply {
@@ -2063,6 +2080,7 @@ class VidluxProvider : MainAPI() {
 
             val spiderHandle = startSpiderBackground(session.host, ref, origLang)
             var workingServers = 0
+            var hitRateLimit = false
 
             try {
                 for ((serverId, serverName) in VIDLUX_SERVERS) {
@@ -2095,6 +2113,7 @@ class VidluxProvider : MainAPI() {
                     )
 
                     if (res.rateLimited && res.items.isEmpty()) {
+                        hitRateLimit = true
                         ClipboardLogger.logAndCopy("RateLimit ($serverName)", res.errorMsg)
                         break
                     }
@@ -2108,24 +2127,27 @@ class VidluxProvider : MainAPI() {
                     if (serverLive > 0) {
                         workingServers++
                     }
-                    if (res.rateLimited) break
-                }
-
-                // Nếu vẫn chưa có link nào và nhánh Spider ngầm vẫn đang chạy, chờ tối đa tới hết ngưỡng 68s
-                if (emittedLinks == 0) {
-                    val alreadyReady = rankAndFilterSpiderItems(spiderHandle.takeReadyItems())
-                    if (alreadyReady.isNotEmpty()) {
-                        ClipboardLogger.logAndCopy("Spider (Browser)", "Tìm thấy ${alreadyReady.size} nguồn từ 02pcembed")
-                        emitStreamBatch(session.host, session.embedUrl, alreadyReady)
+                    if (res.rateLimited) {
+                        hitRateLimit = true
+                        break
                     }
                 }
 
-                if (emittedLinks == 0 && !spiderHandle.isDone()) {
-                    val waitMs = (tier1DeadlineMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
+                // Thu hoạch nốt kết quả Spider sẵn có hoặc chờ nhánh Spider ngầm còn lại nếu chưa đủ luồng
+                val alreadyReady = rankAndFilterSpiderItems(spiderHandle.takeReadyItems())
+                if (alreadyReady.isNotEmpty() && emittedLinks < 3) {
+                    ClipboardLogger.logAndCopy("Spider (Browser)", "Tìm thấy ${alreadyReady.size} nguồn từ 02pcembed")
+                    emitStreamBatch(session.host, session.embedUrl, alreadyReady)
+                }
+
+                val needSpiderWait = (emittedLinks == 0 || (hitRateLimit && emittedLinks < 2)) && !spiderHandle.isDone()
+                if (needSpiderWait) {
+                    val remTier1Ms = (tier1DeadlineMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
+                    val waitMs = if (emittedLinks == 0) remTier1Ms else minOf(10_000L, remTier1Ms)
                     if (waitMs > 500L) {
                         awaitSpiderBatch(spiderHandle, waitMs)
                         val lateReady = rankAndFilterSpiderItems(spiderHandle.takeReadyItems())
-                        if (lateReady.isNotEmpty()) {
+                        if (lateReady.isNotEmpty() && emittedLinks < 3) {
                             ClipboardLogger.logAndCopy("Spider (Browser)", "Tìm thấy ${lateReady.size} nguồn từ 02pcembed")
                             emitStreamBatch(session.host, session.embedUrl, lateReady)
                         }
