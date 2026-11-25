@@ -1,10 +1,28 @@
 package com.movieshdhub
 
-import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.Episode
+import com.lagradost.cloudstream3.HomePageResponse
+import com.lagradost.cloudstream3.LoadResponse
+import com.lagradost.cloudstream3.MainAPI
+import com.lagradost.cloudstream3.MainPageRequest
+import com.lagradost.cloudstream3.SearchResponse
+import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.TvType
+import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.mainPageOf
+import com.lagradost.cloudstream3.newEpisode
+import com.lagradost.cloudstream3.newHomePageResponse
+import com.lagradost.cloudstream3.newMovieLoadResponse
+import com.lagradost.cloudstream3.newMovieSearchResponse
+import com.lagradost.cloudstream3.newTvSeriesLoadResponse
+import com.lagradost.cloudstream3.newTvSeriesSearchResponse
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.M3u8Helper
+import com.lagradost.cloudstream3.utils.newExtractorLink
+import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import org.json.JSONObject
 import java.net.URLEncoder
 
 class MoviesHDHub : MainAPI() {
@@ -30,20 +48,24 @@ class MoviesHDHub : MainAPI() {
         "$mainUrl/genre/thriller/" to "Thriller"
     )
 
-    private val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+    private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
+    private val yearRegex = Regex("(19|20)\\d{2}")
+    private val digitsRegex = Regex("(\\d+)")
+    private val trailingEpRegex = Regex("(\\d+)\\s*$")
+    private val titleYearSuffixRegex = Regex("[-\\s]+\\(?(19|20)\\d{2}\\)?$")
+    private val posterSizeRegex = Regex("/(w92|w154|w185|w300|w342|w780)/")
+    private val movieSlugRegex = Regex("/movies?/([^/]+)/?$")
+
     private fun headers(referer: String = "$mainUrl/") = mapOf(
-        "User-Agent" to UA,
+        "User-Agent" to userAgent,
         "Referer" to referer,
         "Origin" to mainUrl,
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language" to "en-US,en;q=0.9"
     )
 
-    // =====================================================================
-    // HOME
-    // =====================================================================
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         ClipboardLogger.reset()
         val base = request.data.ifBlank { mainUrl }
@@ -60,9 +82,6 @@ class MoviesHDHub : MainAPI() {
         return newHomePageResponse(request.name, items, false)
     }
 
-    // =====================================================================
-    // SEARCH
-    // =====================================================================
     override suspend fun search(query: String): List<SearchResponse> {
         ClipboardLogger.logAndCopy("SEARCH", "query=$query")
         val url = "$mainUrl/?s=${URLEncoder.encode(query, "UTF-8")}"
@@ -91,38 +110,39 @@ class MoviesHDHub : MainAPI() {
             ?: selectFirst(".poster img")?.attr("src")
             ?: selectFirst(".image img")?.attr("src")
             ?: selectFirst("img")?.attr("src"))
-            ?.replace(Regex("/(w92|w154|w185|w300|w342|w780)/"), "/w500/")
+            ?.replace(posterSizeRegex, "/w500/")
             ?.takeIf { it.startsWith("http") }
             ?.let { fixUrl(it) }
 
         val typeClass = selectFirst(".search-type")?.attr("class").orEmpty()
-        val isTv = typeClass.contains("tv-type")
-                || typeClass.contains("season-type")
-                || typeClass.contains("episode-type")
-                || hasClass("tvshows")
-                || href.contains("/tvshows/")
+        val isTv = typeClass.contains("tv-type") ||
+                typeClass.contains("season-type") ||
+                typeClass.contains("episode-type") ||
+                hasClass("tvshows") ||
+                href.contains("/tvshows/")
 
         val year = selectFirst(".meta .year a")?.text()?.toIntOrNull()
             ?: selectFirst(".meta .year")?.text()?.toIntOrNull()
 
-        return if (isTv) newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
-            this.posterUrl = poster
-            this.year = year
-        } else newMovieSearchResponse(title, href, TvType.Movie) {
-            this.posterUrl = poster
-            this.year = year
+        return if (isTv) {
+            newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
+                this.posterUrl = poster
+                this.year = year
+            }
+        } else {
+            newMovieSearchResponse(title, href, TvType.Movie) {
+                this.posterUrl = poster
+                this.year = year
+            }
         }
     }
 
-    // =====================================================================
-    // LOAD
-    // =====================================================================
     override suspend fun load(url: String): LoadResponse {
         ClipboardLogger.logAndCopy("LOAD", "url=$url")
         val doc = app.get(url, headers = headers(url)).document
 
         val rawTitle = doc.selectFirst(".sheader .data h1")?.text()?.trim().orEmpty()
-        val title = rawTitle.replace(Regex("[-\\s]+\\(?(19|20)\\d{2}\\)?$"), "").trim()
+        val title = rawTitle.replace(titleYearSuffixRegex, "").trim()
 
         val poster = (doc.selectFirst("meta[property=og:image]")?.attr("content")
             ?: doc.selectFirst(".sheader .poster img")?.attr("src"))
@@ -132,19 +152,20 @@ class MoviesHDHub : MainAPI() {
         val plot = doc.selectFirst("#info .wp-content p")?.text()?.trim().orEmpty()
 
         val dateText = doc.selectFirst(".sheader .data .extra .date")?.text().orEmpty()
-        val year = Regex("(19|20)\\d{2}").find(dateText)?.value?.toIntOrNull()
+        val year = yearRegex.find(dateText)?.value?.toIntOrNull()
 
-        val duration = doc.selectFirst(".sheader .data .extra .runtime")?.text()
-            ?.let { Regex("(\\d+)").find(it)?.groupValues?.get(1)?.toIntOrNull() }
+        val runtimeText = doc.selectFirst(".sheader .data .extra .runtime")?.text()
+        val duration = runtimeText?.let { digitsRegex.find(it)?.groupValues?.getOrNull(1)?.toIntOrNull() }
 
         val tags = doc.select(".sgeneros a").map { it.text().trim() }
 
-        val isSeries = url.contains("/tvshows/")
-                || doc.selectFirst("#seasons, .single-tvshows") != null
-                || doc.selectFirst(".tvshows .se-c") != null
+        val isSeries = url.contains("/tvshows/") ||
+                doc.selectFirst("#seasons, .single-tvshows") != null ||
+                doc.selectFirst(".tvshows .se-c") != null
 
         ClipboardLogger.logAndCopy(
-            "LOAD", "title=$title | year=$year | dur=$duration | series=$isSeries"
+            "LOAD",
+            "title=$title | year=$year | dur=$duration | series=$isSeries"
         )
 
         return if (isSeries) {
@@ -172,36 +193,40 @@ class MoviesHDHub : MainAPI() {
 
         if (seasonBlocks.isNotEmpty()) {
             seasonBlocks.forEachIndexed { sIdx, seC ->
-                val seasonNum = seC.selectFirst(".se-q .se-t, .se-q")?.text()
-                    ?.let { Regex("(\\d+)").find(it)?.groupValues?.get(1)?.toIntOrNull() }
-                    ?: (sIdx + 1)
+                val seasonLabel = seC.selectFirst(".se-q .se-t, .se-q")?.text()
+                val seasonNum = seasonLabel?.let {
+                    digitsRegex.find(it)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                } ?: (sIdx + 1)
+
                 seC.select(".se-a .episodios li").forEachIndexed { eIdx, li ->
                     val a = li.selectFirst(".episodiotitle a, a") ?: return@forEachIndexed
                     val epHref = fixUrl(a.attr("href"))
                     if (epHref.isBlank()) return@forEachIndexed
-                    val epNum = li.selectFirst(".numerando")?.text()?.let {
-                        Regex("(\\d+)\\s*$").find(it)?.groupValues?.get(1)?.toIntOrNull()
+                    val numText = li.selectFirst(".numerando")?.text()
+                    val epNum = numText?.let {
+                        trailingEpRegex.find(it)?.groupValues?.getOrNull(1)?.toIntOrNull()
                     } ?: (eIdx + 1)
-                    list.add(newEpisode(epHref) {
-                        this.name = a.text().trim().ifBlank { "Episode $epNum" }
-                        this.season = seasonNum
-                        this.episode = epNum
-                    })
+                    list.add(
+                        newEpisode(epHref) {
+                            this.name = a.text().trim().ifBlank { "Episode $epNum" }
+                            this.season = seasonNum
+                            this.episode = epNum
+                        }
+                    )
                 }
             }
         } else {
-            list.add(newEpisode(baseUrl) {
-                this.name = "Full"
-                this.season = 1
-                this.episode = 1
-            })
+            list.add(
+                newEpisode(baseUrl) {
+                    this.name = "Full"
+                    this.season = 1
+                    this.episode = 1
+                }
+            )
         }
         return list
     }
 
-    // =====================================================================
-    // LOAD LINKS — dùng full headers từ WebView
-    // =====================================================================
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -213,13 +238,12 @@ class MoviesHDHub : MainAPI() {
 
         val postId = doc.selectFirst("meta#dooplay-ajax-counter")?.attr("data-postid").orEmpty()
             .ifBlank { doc.selectFirst("[data-postid]")?.attr("data-postid").orEmpty() }
-            .ifBlank {
-                Regex("/movies?/([^/]+)/?$").find(data)?.groupValues?.get(1).orEmpty()
-            }
+            .ifBlank { movieSlugRegex.find(data)?.groupValues?.getOrNull(1).orEmpty() }
 
         val servers = doc.select("li.dooplay_player_option")
             .filter {
-                it.attr("data-nume").isNotEmpty() && it.attr("data-nume") != "trailer"
+                val nume = it.attr("data-nume")
+                nume.isNotEmpty() && nume != "trailer"
             }
 
         ClipboardLogger.logAndCopy("LINKS", "postId=$postId | servers=${servers.size}")
@@ -248,8 +272,8 @@ class MoviesHDHub : MainAPI() {
 
                 val target: SniffResult? =
                     sniffed.firstOrNull { it.url.contains("/master.m3u8") }
-                        ?: sniffed.firstOrNull { it.url.contains(".m3u8", true) }
-                        ?: sniffed.firstOrNull { it.url.contains(".mp4", true) }
+                        ?: sniffed.firstOrNull { it.url.contains(".m3u8", ignoreCase = true) }
+                        ?: sniffed.firstOrNull { it.url.contains(".mp4", ignoreCase = true) }
 
                 if (target == null) {
                     ClipboardLogger.logAndCopy("SERVER-$nume", "no m3u8/mp4")
@@ -268,34 +292,38 @@ class MoviesHDHub : MainAPI() {
                     else -> target.referer
                 }
 
-                // Build headers từ WebView request gốc
                 val finalHdrs = mutableMapOf<String, String>()
                 target.requestHeaders.forEach { (k, v) ->
-                    if (!k.equals("Content-Length", true) &&
-                        !k.equals("Host", true) &&
-                        !k.equals("Connection", true)
-                    ) finalHdrs[k] = v
+                    if (!k.equals("Content-Length", ignoreCase = true) &&
+                        !k.equals("Host", ignoreCase = true) &&
+                        !k.equals("Connection", ignoreCase = true)
+                    ) {
+                        finalHdrs[k] = v
+                    }
                 }
-                // Đảm bảo có Referer + Origin
-                if (finalHdrs.keys.none { it.equals("Referer", true) })
+                if (finalHdrs.keys.none { it.equals("Referer", ignoreCase = true) }) {
                     finalHdrs["Referer"] = domainRef
-                if (finalHdrs.keys.none { it.equals("Origin", true) })
+                }
+                if (finalHdrs.keys.none { it.equals("Origin", ignoreCase = true) }) {
                     finalHdrs["Origin"] = domainRef.trimEnd('/')
-                if (finalHdrs.keys.none { it.equals("User-Agent", true) })
-                    finalHdrs["User-Agent"] = UA
-                if (target.cookies.isNotBlank())
+                }
+                if (finalHdrs.keys.none { it.equals("User-Agent", ignoreCase = true) }) {
+                    finalHdrs["User-Agent"] = userAgent
+                }
+                if (target.cookies.isNotBlank()) {
                     finalHdrs["Cookie"] = target.cookies
+                }
 
                 ClipboardLogger.logAndCopy(
                     "TARGET",
                     "url=${target.url.take(150)} | hdrs=[${finalHdrs.keys.joinToString(",")}] | cookie.len=${target.cookies.length}"
                 )
 
-                // TEST 1 LẦN ĐỂ VERIFY
                 try {
                     val test = app.get(target.url, headers = finalHdrs)
                     ClipboardLogger.logAndCopy(
-                        "TEST", "code=${test.code} len=${test.text.length}"
+                        "TEST",
+                        "code=${test.code} len=${test.text.length}"
                     )
                     if (test.code !in 200..299) {
                         ClipboardLogger.logAndCopy("TEST", "REJECTED — skip")
@@ -303,27 +331,28 @@ class MoviesHDHub : MainAPI() {
                     }
                 } catch (e: Exception) {
                     ClipboardLogger.logAndCopy("TEST", "fail: ${e.message}")
+                    continue
                 }
 
-                // EMIT — dùng headers từ WebView
-                if (target.url.contains(".m3u8")) {
+                if (target.url.contains(".m3u8", ignoreCase = true)) {
                     try {
-                        callback(newExtractorLink(
-                            source = "$name [$label]",
-                            name = "$name [$label] • HLS",
-                            url = target.url,
-                            type = ExtractorLinkType.M3U8
-                        ) {
-                            this.referer = domainRef
-                            this.headers = finalHdrs
-                        })
+                        callback(
+                            newExtractorLink(
+                                source = "$name [$label]",
+                                name = "$name [$label] • HLS",
+                                url = target.url,
+                                type = ExtractorLinkType.M3U8
+                            ) {
+                                this.referer = domainRef
+                                this.headers = finalHdrs
+                            }
+                        )
                         emitted = true
                         ClipboardLogger.logAndCopy("EMIT-RAW", "OK")
                     } catch (t: Throwable) {
                         ClipboardLogger.logAndCopy("EMIT-RAW", "fail: ${t.message}")
                     }
 
-                    // Thử bóc variant qua M3U8Helper với cùng headers
                     try {
                         val gen = M3u8Helper.generateM3u8(
                             source = "$name [$label]",
@@ -332,20 +361,25 @@ class MoviesHDHub : MainAPI() {
                             headers = finalHdrs
                         )
                         ClipboardLogger.logAndCopy("M3U8-RES", "found ${gen.size}")
-                        gen.forEach { callback(it); emitted = true }
+                        gen.forEach {
+                            callback(it)
+                            emitted = true
+                        }
                     } catch (t: Throwable) {
                         ClipboardLogger.logAndCopy("M3U8-FAIL", "${t.message}")
                     }
-                } else if (target.url.contains(".mp4")) {
-                    callback(newExtractorLink(
-                        source = "$name [$label]",
-                        name = "$name [$label] • MP4",
-                        url = target.url,
-                        type = ExtractorLinkType.VIDEO
-                    ) {
-                        this.referer = domainRef
-                        this.headers = finalHdrs
-                    })
+                } else if (target.url.contains(".mp4", ignoreCase = true)) {
+                    callback(
+                        newExtractorLink(
+                            source = "$name [$label]",
+                            name = "$name [$label] • MP4",
+                            url = target.url,
+                            type = ExtractorLinkType.VIDEO
+                        ) {
+                            this.referer = domainRef
+                            this.headers = finalHdrs
+                        }
+                    )
                     emitted = true
                 }
 
@@ -359,9 +393,6 @@ class MoviesHDHub : MainAPI() {
         return emitted
     }
 
-    // =====================================================================
-    // FETCH EMBED URL
-    // =====================================================================
     private suspend fun fetchEmbedUrl(
         postId: String,
         nume: String,
