@@ -1,7 +1,5 @@
 package com.movieshdhub
 
-import android.annotation.SuppressLint
-import android.app.Activity
 import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
@@ -20,10 +18,10 @@ import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.ProgressBar
 import com.lagradost.cloudstream3.CommonActivity
+import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
-import kotlin.coroutines.suspendCoroutine
 
 data class SniffResult(
     val url: String,
@@ -46,6 +44,8 @@ object WebViewSniffer {
         "cast_sender", "cdn-cgi/rum", "gstatic.com/cv", "cuid"
     )
 
+    private val SEGMENT_PATTERN = Regex(""".*\.(ts|m4s|key|aac|vtt|srt|jpg|png|webp|gif)(\?.*)?$""")
+
     suspend fun sniff(
         url: String,
         referer: String,
@@ -54,16 +54,20 @@ object WebViewSniffer {
     ): List<SniffResult> {
         val activity = CommonActivity.activity ?: return emptyList()
 
-        return suspendCoroutine { cont ->
+        return suspendCancellableCoroutine { cont ->
             val main = Handler(Looper.getMainLooper())
             val results = ConcurrentHashMap<String, SniffResult>()
             val done = AtomicBoolean(false)
-            val lastPageUrl = arrayOf(url)
             val resumed = AtomicBoolean(false)
+            var lastPageUrl = url
+            var timeoutRunnable: Runnable? = null
+            var finishRunnable: Runnable? = null
 
-            fun finish(value: List<SniffResult>) {
+            fun finishOnce(value: List<SniffResult>) {
                 if (!resumed.compareAndSet(false, true)) return
-                cont.resume(value)
+                timeoutRunnable?.let { main.removeCallbacks(it) }
+                finishRunnable?.let { main.removeCallbacks(it) }
+                if (cont.isActive) cont.resume(value)
             }
 
             main.post {
@@ -80,11 +84,11 @@ object WebViewSniffer {
                         }
                     }
 
+                    @Suppress("SetJavaScriptEnabled")
                     val webView = WebView(activity).apply {
                         settings.apply {
                             javaScriptEnabled = true
                             domStorageEnabled = true
-                            databaseEnabled = true
                             mediaPlaybackRequiresUserGesture = false
                             loadWithOverviewMode = true
                             useWideViewPort = true
@@ -100,6 +104,7 @@ object WebViewSniffer {
                         isFocusableInTouchMode = true
                         requestFocus()
                     }
+
                     CookieManager.getInstance().setAcceptCookie(true)
                     CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
 
@@ -112,6 +117,8 @@ object WebViewSniffer {
 
                     fun cleanup() {
                         if (!done.compareAndSet(false, true)) return
+                        timeoutRunnable?.let { main.removeCallbacks(it) }
+                        finishRunnable?.let { main.removeCallbacks(it) }
                         try { CookieManager.getInstance().flush() } catch (_: Throwable) {}
                         main.post {
                             try { overlay.removeAllViews() } catch (_: Throwable) {}
@@ -119,12 +126,19 @@ object WebViewSniffer {
                             try { webView.stopLoading() } catch (_: Throwable) {}
                             try { webView.loadUrl("about:blank") } catch (_: Throwable) {}
                             try { webView.destroy() } catch (_: Throwable) {}
-                            finish(sortResults(results.values.toList()))
+                            finishOnce(sortResults(results.values.toList()))
                         }
                     }
 
                     fun scheduleFinish(delayMs: Long) {
-                        main.postDelayed({ cleanup() }, delayMs)
+                        finishRunnable?.let { main.removeCallbacks(it) }
+                        val r = Runnable { cleanup() }
+                        finishRunnable = r
+                        main.postDelayed(r, delayMs)
+                    }
+
+                    cont.invokeOnCancellation {
+                        cleanup()
                     }
 
                     webView.webViewClient = object : WebViewClient() {
@@ -134,17 +148,21 @@ object WebViewSniffer {
                         ): WebResourceResponse? {
                             val u = request?.url?.toString() ?: return null
                             if (isMediaUrl(u)) {
-                                val ref = lastPageUrl[0]
+                                val ref = lastPageUrl
                                 val reqHdrs: Map<String, String> = try {
                                     request.requestHeaders ?: emptyMap()
-                                } catch (_: Throwable) { emptyMap() }
+                                } catch (_: Throwable) {
+                                    emptyMap()
+                                }
 
                                 val cookieFromReq = reqHdrs.entries
                                     .firstOrNull { it.key.equals("Cookie", true) }
-                                    ?.value ?: ""
+                                    ?.value.orEmpty()
                                 val cookieFromJar = try {
                                     CookieManager.getInstance().getCookie(u).orEmpty()
-                                } catch (_: Throwable) { "" }
+                                } catch (_: Throwable) {
+                                    ""
+                                }
 
                                 val mergedCookie = when {
                                     cookieFromReq.isNotBlank() && cookieFromJar.isNotBlank() ->
@@ -162,19 +180,19 @@ object WebViewSniffer {
                                         "SNIFF",
                                         "hit=${u.take(180)} | hdrs=${reqHdrs.keys.joinToString(",")} | cookie.len=${mergedCookie.length}"
                                     )
-                                    if (results.size >= 2) scheduleFinish(3500)
-                                    else scheduleFinish(6000)
+                                    if (results.size >= 2) scheduleFinish(3500L)
+                                    else scheduleFinish(6000L)
                                 }
                             }
                             return null
                         }
 
-                        override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                            if (url != null) lastPageUrl[0] = url
+                        override fun onPageStarted(view: WebView?, pageUrl: String?, favicon: Bitmap?) {
+                            if (pageUrl != null) lastPageUrl = pageUrl
                         }
 
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            if (url != null) lastPageUrl[0] = url
+                        override fun onPageFinished(view: WebView?, pageUrl: String?) {
+                            if (pageUrl != null) lastPageUrl = pageUrl
                             spinner.visibility = View.GONE
                             view?.evaluateJavascript(AUTOPLAY_JS, null)
                             view?.evaluateJavascript(DPAD_JS, null)
@@ -191,8 +209,8 @@ object WebViewSniffer {
                         }
                     }
 
-                    webView.setOnKeyListener { _, keyCode, event ->
-                        if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+                    val keyListener = View.OnKeyListener { _, keyCode, event ->
+                        if (event.action != KeyEvent.ACTION_DOWN) return@OnKeyListener false
                         when (keyCode) {
                             KeyEvent.KEYCODE_DPAD_UP -> {
                                 webView.evaluateJavascript("__dpadMove(0,-25)", null); true
@@ -212,17 +230,30 @@ object WebViewSniffer {
                             else -> false
                         }
                     }
+                    webView.setOnKeyListener(keyListener)
+                    overlay.setOnKeyListener(keyListener)
 
                     try {
                         (activity.window.decorView as? ViewGroup)?.addView(overlay)
-                    } catch (_: Throwable) {}
+                    } catch (_: Throwable) {
+                    }
 
-                    webView.loadUrl(url)
-                    main.postDelayed({ cleanup() }, timeoutMs)
+                    val initHeaders = headers.filterKeys { !it.equals("Referer", true) }
+                    val effectiveReferer = headers.entries
+                        .firstOrNull { it.key.equals("Referer", true) }
+                        ?.value ?: referer
+                    if (effectiveReferer.isNotBlank()) {
+                        webView.loadUrl(url, initHeaders + ("Referer" to effectiveReferer))
+                    } else {
+                        webView.loadUrl(url, initHeaders)
+                    }
 
+                    val tRunnable = Runnable { cleanup() }
+                    timeoutRunnable = tRunnable
+                    main.postDelayed(tRunnable, timeoutMs)
                 } catch (t: Throwable) {
                     ClipboardLogger.logAndCopy("WEBVIEW", "init fail: ${t.message}")
-                    finish(emptyList())
+                    finishOnce(emptyList())
                 }
             }
         }
@@ -234,8 +265,8 @@ object WebViewSniffer {
                 {
                     when {
                         it.url.contains("/master.m3u8") -> 0
-                        it.url.contains(".m3u8") -> 1
-                        it.url.contains(".mp4") -> 2
+                        it.url.contains(".m3u8", ignoreCase = true) -> 1
+                        it.url.contains(".mp4", ignoreCase = true) -> 2
                         else -> 3
                     }
                 },
@@ -246,10 +277,8 @@ object WebViewSniffer {
     private fun isMediaUrl(u: String): Boolean {
         val l = u.lowercase()
         if (AD_DOMAINS.any { l.contains(it) }) return false
-        val segmentPattern = Regex(""".*\.(ts|m4s|key|aac|vtt|srt|jpg|png|webp|gif)(\?.*)?$""")
-        if (segmentPattern.matches(l)) return false
-        if (l.contains(".m3u8") || l.contains(".mp4")) return true
-        return false
+        if (SEGMENT_PATTERN.matches(l)) return false
+        return l.contains(".m3u8") || l.contains(".mp4")
     }
 
     private const val AUTOPLAY_JS = """
