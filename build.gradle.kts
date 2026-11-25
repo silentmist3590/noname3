@@ -53,16 +53,16 @@ subprojects {
     }
 
     dependencies {
-        val cloudstream by configurations
-        val implementation by configurations
-        cloudstream("com.lagradost:cloudstream3:pre-release")
-        implementation(kotlin("stdlib"))
-        
-        // THÊM LẠI CÁC THƯ VIỆN BẮT BUỘC CHO TẤT CẢ CÁC MODULE
-        implementation("org.jsoup:jsoup:1.17.2")
-        implementation("com.github.Blatzar:NiceHttp:0.4.18")
-        implementation("com.squareup.okhttp3:okhttp:4.12.0")
-        implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1")
+        val cloudstreamConfig = configurations.getByName("cloudstream")
+        val implementationConfig = configurations.getByName("implementation")
+
+        add(cloudstreamConfig.name, "com.lagradost:cloudstream3:pre-release")
+        add(implementationConfig.name, kotlin("stdlib"))
+
+        add(implementationConfig.name, "org.jsoup:jsoup:1.17.2")
+        add(implementationConfig.name, "com.github.Blatzar:NiceHttp:0.4.18")
+        add(implementationConfig.name, "com.squareup.okhttp3:okhttp:4.12.0")
+        add(implementationConfig.name, "com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1")
     }
 }
 
