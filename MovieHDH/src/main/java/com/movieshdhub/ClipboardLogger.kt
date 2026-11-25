@@ -2,7 +2,6 @@ package com.movieshdhub
 
 import android.content.ClipData
 import android.content.ClipboardManager
-import android.content.Context
 import android.util.Log
 import com.lagradost.cloudstream3.CommonActivity
 
@@ -14,12 +13,11 @@ object ClipboardLogger {
         val line = "[$tag] $message"
         buffer.add(line)
         Log.d(TAG, line)
-        val ctx = CommonActivity.activity ?: return
+        val clipboard = CommonActivity.activity?.getSystemService(ClipboardManager::class.java) ?: return
         try {
-            (ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
-                .setPrimaryClip(
-                    ClipData.newPlainText("MoviesHDHub Log", buffer.joinToString("\n"))
-                )
+            clipboard.setPrimaryClip(
+                ClipData.newPlainText("MoviesHDHub Log", buffer.joinToString("\n"))
+            )
         } catch (t: Throwable) {
             Log.e(TAG, "clipboard write failed: ${t.message}")
         }
@@ -27,10 +25,9 @@ object ClipboardLogger {
 
     fun reset() {
         buffer.clear()
-        val ctx = CommonActivity.activity ?: return
+        val clipboard = CommonActivity.activity?.getSystemService(ClipboardManager::class.java) ?: return
         try {
-            (ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
-                .setPrimaryClip(ClipData.newPlainText("", ""))
+            clipboard.setPrimaryClip(ClipData.newPlainText("", ""))
         } catch (t: Throwable) {
             Log.e(TAG, "clipboard reset failed: ${t.message}")
         }
