@@ -3,36 +3,58 @@ package com.movieshdhub
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import com.lagradost.cloudstream3.CommonActivity
 
 object ClipboardLogger {
-    private const val TAG = "MoviesHDHub"
-    private val buffer = mutableListOf<String>()
+    private var appContext: Context? = null
+    private val buffer = StringBuilder()
 
-    private fun copy(text: String) {
+    fun init(context: Context) {
+        appContext = context.applicationContext ?: context
+    }
+
+    private fun getContext(): Context? {
+        if (appContext != null) return appContext
+        val act = CommonActivity.activity
+        if (act != null) {
+            appContext = act.applicationContext
+            return appContext
+        }
         try {
-            val ctx: Context? = CommonActivity.activity
-            val cm = ctx?.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-            if (cm != null) {
-                cm.setPrimaryClip(ClipData.newPlainText("MoviesHDHub Log", text))
+            val at = Class.forName("android.app.ActivityThread")
+            val method = at.getMethod("currentApplication")
+            val app = method.invoke(null) as? Context
+            if (app != null) {
+                appContext = app
+                return appContext
             }
-        } catch (t: Throwable) {
-            Log.e(TAG, "clipboard write failed: ${t.message}")
+        } catch (_: Exception) { }
+        return null
+    }
+
+    fun logAndCopy(tag: String, message: String) {
+        Log.d("MoviesHDHub", "[$tag] $message")
+        synchronized(buffer) {
+            buffer.append("[$tag] $message\n")
+            val fullText = buffer.toString()
+            val ctx = getContext() ?: return
+            try {
+                Handler(Looper.getMainLooper()).post {
+                    try {
+                        val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                        cm?.setPrimaryClip(ClipData.newPlainText("moviehdh_logs", fullText))
+                    } catch (_: Exception) { }
+                }
+            } catch (_: Exception) { }
         }
     }
 
-    @Synchronized
-    fun logAndCopy(tag: String, message: String) {
-        val line = "[$tag] $message"
-        buffer.add(line)
-        Log.d(TAG, line)
-        copy(buffer.joinToString("\n"))
-    }
-
-    @Synchronized
     fun reset() {
-        buffer.clear()
-        copy("")
+        synchronized(buffer) {
+            buffer.setLength(0)
+        }
     }
 }
