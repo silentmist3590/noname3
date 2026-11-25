@@ -28,6 +28,17 @@ import java.net.URLEncoder
 class MoviesHDHub : MainAPI() {
 
     override var mainUrl = "https://movieshdhub.com"
+
+    private fun fixUrl(url: String): String {
+        val u = url.trim()
+        return when {
+            u.isEmpty() -> u
+            u.startsWith("http://") || u.startsWith("https://") -> u
+            u.startsWith("//") -> "https:$u"
+            u.startsWith("/") -> mainUrl.trimEnd('/') + u
+            else -> mainUrl.trimEnd('/') + "/" + u
+        }
+    }
     override var name = "MoviesHDHub"
     override var lang = "en"
     override val hasMainPage = true
