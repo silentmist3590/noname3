@@ -27,7 +27,8 @@ import kotlin.coroutines.suspendCoroutine
 data class SniffHit(
     val url: String,
     val referer: String,
-    val source: String
+    val source: String,
+    val cookies: String = ""
 )
 
 object VidZenSniffer {
@@ -153,15 +154,21 @@ object VidZenSniffer {
                         if (hits.putIfAbsent(cleanUrl, SniffHit(cleanUrl, lastPageUrl[0], source)) == null) {
                             ClipboardLogger.logAndCopy("SNIFF", "✓ [$source] ${cleanUrl.take(200)}")
                         }
+                        if (hits.putIfAbsent(cleanUrl, SniffHit(cleanUrl, lastPageUrl[0], source, cookie)) == null) {
+                            ClipboardLogger.logAndCopy("SNIFF", "✓ [$source] ${cleanUrl.take(150)} | cookie.len=${cookie.length}")
+                        }
                     }
 
                     webView.webViewClient = object : WebViewClient() {
-                        override fun shouldInterceptRequest(
-                            view: WebView?,
-                            request: WebResourceRequest?
-                        ): WebResourceResponse? {
+                        override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                             val u = request?.url?.toString() ?: return null
-                            addHit(u, "network")
+                                if (isMediaUrl(u)) {
+                                val ref = lastPageUrl[0]
+                                val cookie = try {
+                                CookieManager.getInstance().getCookie(u).orEmpty()
+                                } catch (_: Throwable) { "" }
+                                addHit(u, "network", cookie)
+                            }
                             return null
                         }
 
