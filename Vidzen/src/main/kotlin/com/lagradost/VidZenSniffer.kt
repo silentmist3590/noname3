@@ -41,7 +41,7 @@ object VidZenSniffer {
         "googletagmanager", "amung.us", "histats", "waust.at",
         "adservice", "adskeeper", "disable-devtool", "acscdn",
         "cloudflareinsights", "beacon.min.js", "gstatic.com/cv",
-        "cast_sender", "cdn-cgi/rum"
+        "cast_sender", "cdn-cgi/rum", "cdn.jsdelivr.net"
     )
 
     private val STREAM_HINTS: List<Regex> = listOf(
@@ -57,9 +57,16 @@ object VidZenSniffer {
     )
 
     private val SEGMENT_BLOCK = Regex(
-        """.*\.(ts|m4s|key|aac|vtt|srt|jpg|jpeg|png|gif|webp|css|woff2?)(\?.*)?$""",
+        """.*\.(ts|m4s|key|aac|vtt|srt|jpg|jpeg|png|gif|webp|css|woff2?|js)(\?.*)?$""",
         RegexOption.IGNORE_CASE
     )
+
+    private fun isMediaUrl(u: String): Boolean {
+        val l = u.lowercase()
+        if (AD_DOMAINS.any { l.contains(it) }) return false
+        if (SEGMENT_BLOCK.matches(l)) return false
+        return STREAM_HINTS.any { it.containsMatchIn(l) }
+    }
 
     suspend fun sniff(
         url: String,
@@ -142,7 +149,8 @@ object VidZenSniffer {
                         }, ms)
                     }
 
-                    fun addHit(rawUrl: String, source: String) {
+                    // addHit nhận 3 tham số (đã bao gồm cookie)
+                    fun addHit(rawUrl: String, source: String, cookie: String = "") {
                         if (rawUrl.isBlank()) return
                         val cleanUrl = rawUrl.trim().trim('"', '\'')
                         if (cleanUrl.startsWith("blob:") || cleanUrl.startsWith("data:")) return
@@ -151,21 +159,24 @@ object VidZenSniffer {
                         if (SEGMENT_BLOCK.matches(cleanUrl.lowercase())) return
                         if (STREAM_HINTS.none { it.containsMatchIn(cleanUrl) }) return
 
-                        if (hits.putIfAbsent(cleanUrl, SniffHit(cleanUrl, lastPageUrl[0], source)) == null) {
-                            ClipboardLogger.logAndCopy("SNIFF", "✓ [$source] ${cleanUrl.take(200)}")
-                        }
                         if (hits.putIfAbsent(cleanUrl, SniffHit(cleanUrl, lastPageUrl[0], source, cookie)) == null) {
-                            ClipboardLogger.logAndCopy("SNIFF", "✓ [$source] ${cleanUrl.take(150)} | cookie.len=${cookie.length}")
+                            ClipboardLogger.logAndCopy(
+                                "SNIFF",
+                                "✓ [$source] ${cleanUrl.take(150)} | cookie.len=${cookie.length}"
+                            )
                         }
                     }
 
                     webView.webViewClient = object : WebViewClient() {
-                        override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                        override fun shouldInterceptRequest(
+                            view: WebView?,
+                            request: WebResourceRequest?
+                        ): WebResourceResponse? {
                             val u = request?.url?.toString() ?: return null
-                                if (isMediaUrl(u)) {
+                            if (isMediaUrl(u)) {
                                 val ref = lastPageUrl[0]
                                 val cookie = try {
-                                CookieManager.getInstance().getCookie(u).orEmpty()
+                                    CookieManager.getInstance().getCookie(u).orEmpty()
                                 } catch (_: Throwable) { "" }
                                 addHit(u, "network", cookie)
                             }
@@ -230,6 +241,7 @@ object VidZenSniffer {
     private fun sortHits(list: List<SniffHit>): List<SniffHit> = list.sortedWith(
         compareBy(
             { if (it.url.contains(".m3u8", true)) 0 else 1 },
+            { if (it.cookies.isNotBlank()) 0 else 1 },
             { it.url.length }
         )
     )
