@@ -50,7 +50,7 @@ class VidcoreProvider : MainAPI() {
     companion object {
         // Có thể dán sẵn API Key SubDL miễn phí (lấy tại https://subdl.com/panel/api)
         // Hoặc nhập trực tiếp trong mục Cài đặt Plugin (biểu tượng bánh răng) trên CloudStream
-        private const val DEFAULT_SUBDL_API_KEY = ""
+        private const val DEFAULT_SUBDL_API_KEY = "xHeOWlCfS9o4EKmK7OwbeOBIhfbIHr2Y"
     }
 
     // User-Agent Chrome chuẩn
