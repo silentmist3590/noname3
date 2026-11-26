@@ -153,33 +153,35 @@ class VidZenProvider : MainAPI() {
                 "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
         for (hit in candidates) {
-            ClipboardLogger.logAndCopy("HIT", "[${hit.source}] ${hit.url.take(120)}")
-            try {
-                callback(
-                    newExtractorLink(
-                        source = name,
-                        name = "$name • Auto",
-                        url = hit.url,
-                        type = if (hit.url.contains(".mp4", true))
-                            ExtractorLinkType.VIDEO
-                        else
-                            ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = hit.referer
-                        this.headers = mapOf(
-                            "Referer" to hit.referer,
-                            "Origin" to mainUrl,
-                            "User-Agent" to ua
-                        )
-                    }
+    ClipboardLogger.logAndCopy("HIT", "[${hit.source}] ${hit.url.take(100)}... | cookie.len=${hit.cookies.length}")
+
+    try {
+        callback(
+            newExtractorLink(
+                source = name,
+                name = "$name • Auto",
+                url = hit.url,
+                type = if (hit.url.contains(".mp4", true)) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
+            ) {
+                this.referer = hit.referer
+                val headerMap = mutableMapOf(
+                    "Referer" to hit.referer,
+                    "Origin" to mainUrl,
+                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
                 )
-                emitted = true
-                ClipboardLogger.logAndCopy("EMIT", "✓ Emit thành công: ${hit.url.take(80)}...")
-                break
-            } catch (t: Throwable) {
-                ClipboardLogger.logAndCopy("EMIT-FAIL", "${t.message?.take(80)}")
+                if (hit.cookies.isNotBlank()) {
+                    headerMap["Cookie"] = hit.cookies
+                }
+                this.headers = headerMap
             }
-        }
+        )
+        emitted = true
+        ClipboardLogger.logAndCopy("EMIT", "✓ Emit thành công (cookie.len=${hit.cookies.length})")
+        break
+    } catch (t: Throwable) {
+        ClipboardLogger.logAndCopy("EMIT-FAIL", "${t.message?.take(80)}")
+    }
+}
 
         if (!emitted) ClipboardLogger.logAndCopy("LINKS", "❌ Không emit được link nào")
         return emitted
