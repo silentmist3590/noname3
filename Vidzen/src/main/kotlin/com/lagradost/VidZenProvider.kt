@@ -142,6 +142,9 @@ class VidZenProvider : MainAPI() {
     // =====================================================================
     // LOAD LINKS (Sniff stream + Phụ đề)
     // =====================================================================
+        // =====================================================================
+    // LOAD LINKS (Sniff stream + Phụ đề)
+    // =====================================================================
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -171,42 +174,54 @@ class VidZenProvider : MainAPI() {
 
         var emitted = false
         for (hit in sniffed) {
+            // Bỏ qua các file JS/CSS không liên quan
+            if (hit.url.contains("cdn.jsdelivr.net") || hit.url.contains(".js", true)) continue
+
+            // Chấp nhận: có đuôi .m3u8, .mp4, hoặc link API stream của VidZen
+            val isMedia = hit.url.contains(".m3u8", true) ||
+                          hit.url.contains(".mp4", true) ||
+                          hit.url.contains("/api/stream/", true) ||
+                          hit.url.contains("v1_", true)
+
+            if (!isMedia) continue
+
             ClipboardLogger.logAndCopy("HIT", "[${hit.source}] ${hit.url.take(200)}")
 
-            if (hit.url.contains(".m3u8", true)) {
-                try {
-                    val links = M3u8Helper.generateM3u8(
-                        source = name,
-                        streamUrl = hit.url,
-                        referer = hit.referer,
-                        headers = mapOf("Referer" to hit.referer, "Origin" to mainUrl)
-                    )
-                    if (links.isNotEmpty()) {
-                        links.forEach { callback(it); emitted = true }
-                        ClipboardLogger.logAndCopy("M3U8", "✓ ${links.size} chất lượng")
-                    }
-                } catch (t: Throwable) {
-                    ClipboardLogger.logAndCopy("M3U8", "✗ ${t.message?.take(80)}")
-                }
-            } else if (hit.url.contains(".mp4", true)) {
-                callback(
-                    newExtractorLink(
-                        source = name,
-                        name = "$name • MP4",
-                        url = hit.url,
-                        type = ExtractorLinkType.VIDEO
-                    ) {
-                        this.referer = hit.referer
-                        this.headers = mapOf("Referer" to hit.referer, "Origin" to mainUrl)
-                    }
+            try {
+                // Ép qua M3u8Helper cho mọi link (kể cả link API không có đuôi)
+                val links = M3u8Helper.generateM3u8(
+                    source = name,
+                    streamUrl = hit.url,
+                    referer = hit.referer,
+                    headers = mapOf("Referer" to hit.referer, "Origin" to mainUrl)
                 )
-                emitted = true
-                ClipboardLogger.logAndCopy("MP4", "✓")
+
+                if (links.isNotEmpty()) {
+                    links.forEach { callback(it); emitted = true }
+                    ClipboardLogger.logAndCopy("M3U8", "✓ ${links.size} chất lượng từ ${hit.url.take(50)}...")
+                } else if (hit.url.contains(".mp4", true)) {
+                    // Fallback cho MP4
+                    callback(
+                        newExtractorLink(
+                            source = name,
+                            name = "$name • MP4",
+                            url = hit.url,
+                            type = ExtractorLinkType.VIDEO
+                        ) {
+                            this.referer = hit.referer
+                            this.headers = mapOf("Referer" to hit.referer, "Origin" to mainUrl)
+                        }
+                    )
+                    emitted = true
+                    ClipboardLogger.logAndCopy("MP4", "✓")
+                }
+            } catch (t: Throwable) {
+                ClipboardLogger.logAndCopy("FAIL", "✗ ${hit.url.take(50)}: ${t.message?.take(80)}")
             }
         }
 
         if (!emitted) {
-            ClipboardLogger.logAndCopy("LINKS", "❌ Không có stream nào")
+            ClipboardLogger.logAndCopy("LINKS", "❌ Không có stream nào phát được")
         }
         return emitted
     }
