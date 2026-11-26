@@ -46,6 +46,8 @@ object VidZenSniffer {
         Regex("""/stream[/_.]""", RegexOption.IGNORE_CASE),
         Regex("""/playlist""", RegexOption.IGNORE_CASE),
         Regex("""/manifest""", RegexOption.IGNORE_CASE),
+        Regex("""/api/stream/""", RegexOption.IGNORE_CASE), // <-- THÊM DÒNG NÀY
+        Regex("""v1_""", RegexOption.IGNORE_CASE) 
         Regex("""master\.m3u""", RegexOption.IGNORE_CASE)
     )
 
