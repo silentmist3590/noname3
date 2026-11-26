@@ -1,4 +1,4 @@
-package com.vidzen
+package com.lagradost
 
 import android.content.ClipData
 import android.content.ClipboardManager
