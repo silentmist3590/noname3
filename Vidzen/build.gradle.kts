@@ -8,7 +8,7 @@ cloudstream {
     language = "en"
     description = "VidZen - Next-Gen Streaming API"
     authors = listOf("YourName")
-    version = 6
+    version = 7
     status = 1
     tvTypes = listOf("Movie", "TvSeries")
 }
@@ -25,4 +25,5 @@ dependencies {
     compileOnly("com.github.recloudstream:cloudstream:-SNAPSHOT")
     implementation("org.jsoup:jsoup:1.17.2")
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 }
