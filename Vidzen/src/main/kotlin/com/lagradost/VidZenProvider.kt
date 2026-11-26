@@ -2,7 +2,6 @@ package com.lagradost
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.net.URLEncoder
 
@@ -29,7 +28,84 @@ class VidZenProvider : MainAPI() {
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     )
 
-    // ... (getMainPage, search, load giữ nguyên) ...
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        ClipboardLogger.reset()
+        val url = if (page > 1) "${request.data}&page=$page" else request.data
+        val res = app.get(url, headers = headers()).parsedSafe<TmdbResponse>()
+        val items = res?.results?.mapNotNull { it.toSearchResult() } ?: emptyList()
+        return newHomePageResponse(request.name, items, false)
+    }
+
+    override suspend fun search(query: String): List<SearchResponse> {
+        ClipboardLogger.reset()
+        val url = "$tmdbApi/search/multi?api_key=$tmdbKey&query=${URLEncoder.encode(query, "UTF-8")}"
+        val res = app.get(url, headers = headers()).parsedSafe<TmdbResponse>()
+        return res?.results?.mapNotNull { it.toSearchResult() } ?: emptyList()
+    }
+
+    private fun TmdbItem.toSearchResult(): SearchResponse? {
+        val tmdbId = id ?: return null
+        val title = title ?: name ?: return null
+        val type = mediaType ?: if (title != null) "movie" else "tv"
+        val isTv = type == "tv"
+
+        val poster = posterPath?.let { "https://image.tmdb.org/t/p/w500$it" }
+        val year = (releaseDate ?: firstAirDate)?.take(4)?.toIntOrNull()
+
+        return if (isTv) {
+            newTvSeriesSearchResponse(title, "$mainUrl/tv/$tmdbId", TvType.TvSeries) {
+                this.posterUrl = poster
+                this.year = year
+            }
+        } else {
+            newMovieSearchResponse(title, "$mainUrl/movie/$tmdbId", TvType.Movie) {
+                this.posterUrl = poster
+                this.year = year
+            }
+        }
+    }
+
+    override suspend fun load(url: String): LoadResponse? {
+        val isTv = url.contains("/tv/")
+        val tmdbId = Regex("""/(movie|tv)/(\d+)""").find(url)?.groupValues?.get(2) ?: return null
+        val type = if (isTv) "tv" else "movie"
+
+        val metaUrl = "$tmdbApi/$type/$tmdbId?api_key=$tmdbKey"
+        val meta = app.get(metaUrl, headers = headers()).parsedSafe<TmdbDetail>()
+
+        val title = meta?.title ?: meta?.name ?: "Unknown"
+        val poster = meta?.posterPath?.let { "https://image.tmdb.org/t/p/w500$it" }
+        val plot = meta?.overview
+        val year = (meta?.releaseDate ?: meta?.firstAirDate)?.take(4)?.toIntOrNull()
+
+        val episodes = mutableListOf<Episode>()
+        if (isTv) {
+            val seasonUrl = "$tmdbApi/tv/$tmdbId/season/1?api_key=$tmdbKey"
+            val season = app.get(seasonUrl, headers = headers()).parsedSafe<TmdbSeason>()
+            season?.episodes?.forEach { ep ->
+                val epNum = ep.episodeNumber ?: return@forEach
+                episodes.add(newEpisode("$mainUrl/tv/$tmdbId/1/$epNum") {
+                    this.name = "Tập $epNum"
+                    this.season = 1
+                    this.episode = epNum
+                })
+            }
+        }
+
+        return if (isTv) {
+            newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+                this.posterUrl = poster
+                this.plot = plot
+                this.year = year
+            }
+        } else {
+            newMovieLoadResponse(title, url, TvType.Movie, url) {
+                this.posterUrl = poster
+                this.plot = plot
+                this.year = year
+            }
+        }
+    }
 
     override suspend fun loadLinks(
         data: String,
@@ -37,26 +113,25 @@ class VidZenProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        ClipboardLogger.reset()
         ClipboardLogger.logAndCopy("=== PLAY ===", "data=$data")
 
         val tmdbId = Regex("""/(movie|tv)/(\d+)""").find(data)?.groupValues?.get(2)
-        val type = if (data.contains("/tv/")) "tv" else "movie"
-
         if (tmdbId != null) {
             SubtitleFetcher.fetchSubtitles(tmdbId, null, null, subtitleCallback)
         }
 
-        // Sniff với timeout ngắn hơn
+        // Sniff
         val sniffed = VidZenSniffer.sniff(
             url = data,
             referer = "$mainUrl/",
-            timeoutMs = 45_000L,      // Giảm xuống 45s
-            waitForResultsMs = 5_000L // Chờ tối đa 5s sau khi có kết quả đầu tiên
+            timeoutMs = 45_000L,
+            waitForResultsMs = 5_000L
         )
 
         ClipboardLogger.logAndCopy("SNIFF", "Bắt được ${sniffed.size} URL")
 
-        // Chỉ lấy tối đa 5 link tốt nhất để thử
+        // Lấy tối đa 3 link tốt nhất
         val candidates = sniffed
             .filter { 
                 it.url.contains(".m3u8", true) || 
@@ -66,60 +141,55 @@ class VidZenProvider : MainAPI() {
             }
             .filterNot { it.url.contains(".js", true) }
             .distinctBy { it.url }
-            .take(5)
+            .take(3)
 
         var emitted = false
 
         for (hit in candidates) {
-            ClipboardLogger.logAndCopy("HIT", "[${hit.source}] ${hit.url.take(150)}")
+            ClipboardLogger.logAndCopy("HIT", "[${hit.source}] ${hit.url.take(120)}")
 
-            // Thử M3u8Helper với timeout 8 giây
-            val links = withTimeoutOrNull(8_000L) {
-                try {
-                    M3u8Helper.generateM3u8(
+            // BỎ QUA M3U8HELPER, PHÁT TRỰC TIẾP ĐỂ TRÁNH TIMEOUT
+            try {
+                callback(
+                    newExtractorLink(
                         source = name,
-                        streamUrl = hit.url,
-                        referer = hit.referer,
-                        headers = mapOf("Referer" to hit.referer, "Origin" to mainUrl)
-                    )
-                } catch (t: Throwable) {
-                    ClipboardLogger.logAndCopy("M3U8-FAIL", "${t.message?.take(80)}")
-                    null
-                }
-            }
-
-            if (links != null && links.isNotEmpty()) {
-                links.forEach { callback(it); emitted = true }
-                ClipboardLogger.logAndCopy("M3U8", "✓ ${links.size} chất lượng từ ${hit.url.take(50)}...")
-                break // Đã thành công, dừng lại
-            } else {
-                // Fallback: Phát trực tiếp link gốc (M3U8 hoặc MP4)
-                ClipboardLogger.logAndCopy("FALLBACK", "Phát trực tiếp: ${hit.url.take(80)}...")
-                try {
-                    callback(
-                        newExtractorLink(
-                            source = name,
-                            name = "$name • Auto",
-                            url = hit.url,
-                            type = if (hit.url.contains(".mp4", true)) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
-                        ) {
-                            this.referer = hit.referer
-                            this.headers = mapOf("Referer" to hit.referer, "Origin" to mainUrl)
-                        }
-                    )
-                    emitted = true
-                    break // Đã emit được 1 link, dừng lại
-                } catch (t: Throwable) {
-                    ClipboardLogger.logAndCopy("FALLBACK-FAIL", "${t.message?.take(80)}")
-                }
+                        name = "$name • Stream",
+                        url = hit.url,
+                        type = if (hit.url.contains(".mp4", true)) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = hit.referer
+                        this.headers = mapOf("Referer" to hit.referer, "Origin" to mainUrl)
+                    }
+                )
+                emitted = true
+                ClipboardLogger.logAndCopy("EMIT", "✓ Phát trực tiếp thành công!")
+                break // Đã phát được 1 link, dừng ngay lập tức
+            } catch (t: Throwable) {
+                ClipboardLogger.logAndCopy("EMIT-FAIL", "${t.message?.take(80)}")
             }
         }
 
-        if (!emitted) {
-            ClipboardLogger.logAndCopy("LINKS", "❌ Không có stream nào phát được")
-        }
+        if (!emitted) ClipboardLogger.logAndCopy("LINKS", "❌ Không có stream nào phát được")
         return emitted
     }
 
-    // ... (Các data class giữ nguyên) ...
+    // TMDB Data Models
+    data class TmdbResponse(val results: List<TmdbItem>?)
+    data class TmdbItem(
+        val id: Int?, val title: String?, val name: String?,
+        @com.fasterxml.jackson.annotation.JsonProperty("media_type") val mediaType: String?,
+        @com.fasterxml.jackson.annotation.JsonProperty("poster_path") val posterPath: String?,
+        @com.fasterxml.jackson.annotation.JsonProperty("release_date") val releaseDate: String?,
+        @com.fasterxml.jackson.annotation.JsonProperty("first_air_date") val firstAirDate: String?
+    )
+    data class TmdbDetail(
+        val id: Int?, val title: String?, val name: String?, val overview: String?,
+        @com.fasterxml.jackson.annotation.JsonProperty("poster_path") val posterPath: String?,
+        @com.fasterxml.jackson.annotation.JsonProperty("release_date") val releaseDate: String?,
+        @com.fasterxml.jackson.annotation.JsonProperty("first_air_date") val firstAirDate: String?
+    )
+    data class TmdbSeason(val episodes: List<TmdbEpisode>?)
+    data class TmdbEpisode(
+        @com.fasterxml.jackson.annotation.JsonProperty("episode_number") val episodeNumber: Int?
+    )
 }
