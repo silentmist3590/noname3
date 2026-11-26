@@ -107,99 +107,83 @@ class VidZenProvider : MainAPI() {
         }
     }
 
-    override suspend fun loadLinks(
-    data: String,
-    isCasting: Boolean,
-    subtitleCallback: (SubtitleFile) -> Unit,
-    callback: (ExtractorLink) -> Unit
-): Boolean {
-    ClipboardLogger.reset()
-    ClipboardLogger.logAndCopy("=== PLAY ===", "data=$data")
+        override suspend fun loadLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        ClipboardLogger.reset()
+        ClipboardLogger.logAndCopy("=== PLAY ===", "data=$data")
 
-    val tmdbId = Regex("""/(movie|tv)/(\d+)""").find(data)?.groupValues?.get(2)
-    if (tmdbId != null) {
-        SubtitleFetcher.fetchSubtitles(tmdbId, null, null, subtitleCallback)
-    }
-
-    val sniffed = VidZenSniffer.sniff(
-        url = data,
-        referer = "$mainUrl/",
-        timeoutMs = 45_000L,
-        waitForResultsMs = 5_000L
-    )
-
-    ClipboardLogger.logAndCopy("SNIFF", "Bắt được ${sniffed.size} URL")
-
-    val candidates = sniffed
-        .filter {
-            it.url.contains(".m3u8", true) ||
-            it.url.contains(".mp4", true) ||
-            it.url.contains("/api/stream/", true) ||
-            it.url.contains("v1_", true)
+        val tmdbId = Regex("""/(movie|tv)/(\d+)""").find(data)?.groupValues?.get(2)
+        if (tmdbId != null) {
+            SubtitleFetcher.fetchSubtitles(tmdbId, null, null, subtitleCallback)
         }
-        .filterNot { it.url.contains(".js", true) }
-        .distinctBy { it.url }
-        .take(3)
 
-    var emitted = false
+        // Sniff URL từ WebView
+        val sniffed = VidZenSniffer.sniff(
+            url = data,
+            referer = "$mainUrl/",
+            timeoutMs = 45_000L,
+            waitForResultsMs = 5_000L
+        )
 
-    for (hit in candidates) {
-        ClipboardLogger.logAndCopy("HIT", "[${hit.source}] ${hit.url.take(120)}")
+        ClipboardLogger.logAndCopy("SNIFF", "Bắt được ${sniffed.size} URL")
 
-        // 1. Thử M3u8Helper với timeout ngắn (5 giây)
-        val links = withTimeoutOrNull(5_000L) {
-            try {
-                M3u8Helper.generateM3u8(
-                    source = name,
-                    streamUrl = hit.url,
-                    referer = hit.referer,
-                    headers = mapOf(
-                        "Referer" to hit.referer,
-                        "Origin" to mainUrl,
-                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-                    )
-                )
-            } catch (t: Throwable) {
-                ClipboardLogger.logAndCopy("M3U8-FAIL", "${t.message?.take(80)}")
-                null
+        // Lấy tối đa 3 link tốt nhất
+        val candidates = sniffed
+            .filter {
+                it.url.contains(".m3u8", true) ||
+                it.url.contains(".mp4", true) ||
+                it.url.contains("/api/stream/", true) ||
+                it.url.contains("v1_", true)
             }
+            .filterNot { it.url.contains(".js", true) }
+            .distinctBy { it.url }
+            .take(3)
+
+        if (candidates.isEmpty()) {
+            ClipboardLogger.logAndCopy("LINKS", "❌ Không có ứng viên nào")
+            return false
         }
 
-        if (links != null && links.isNotEmpty()) {
-            links.forEach { callback(it); emitted = true }
-            ClipboardLogger.logAndCopy("M3U8", "✓ ${links.size} chất lượng từ ${hit.url.take(50)}...")
-            break
-        } else {
-            // 2. Fallback: Phát trực tiếp với header đầy đủ
-            ClipboardLogger.logAndCopy("FALLBACK", "Phát trực tiếp: ${hit.url.take(80)}...")
+        var emitted = false
+        val ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+
+        for (hit in candidates) {
+            ClipboardLogger.logAndCopy("HIT", "[${hit.source}] ${hit.url.take(120)}")
             try {
                 callback(
                     newExtractorLink(
                         source = name,
-                        name = "$name • Stream",
+                        name = "$name • Auto",
                         url = hit.url,
-                        type = if (hit.url.contains(".mp4", true)) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
+                        type = if (hit.url.contains(".mp4", true))
+                            ExtractorLinkType.VIDEO
+                        else
+                            ExtractorLinkType.M3U8
                     ) {
                         this.referer = hit.referer
                         this.headers = mapOf(
                             "Referer" to hit.referer,
                             "Origin" to mainUrl,
-                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                            "User-Agent" to ua
                         )
                     }
                 )
                 emitted = true
-                ClipboardLogger.logAndCopy("EMIT", "✓ Phát trực tiếp thành công!")
+                ClipboardLogger.logAndCopy("EMIT", "✓ Emit thành công: ${hit.url.take(80)}...")
                 break
             } catch (t: Throwable) {
                 ClipboardLogger.logAndCopy("EMIT-FAIL", "${t.message?.take(80)}")
             }
         }
-    }
 
-    if (!emitted) ClipboardLogger.logAndCopy("LINKS", "❌ Không có stream nào phát được")
-    return emitted
-}
+        if (!emitted) ClipboardLogger.logAndCopy("LINKS", "❌ Không emit được link nào")
+        return emitted
+    }
 
     // TMDB Data Models
     data class TmdbResponse(val results: List<TmdbItem>?)
