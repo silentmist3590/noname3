@@ -2,7 +2,6 @@ package com.lagradost
 
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.newSubtitleFile
 import com.lagradost.cloudstream3.utils.SubtitleHelper
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -25,7 +24,7 @@ object SubtitleFetcher {
         ClipboardLogger.logAndCopy("SUBS", "Bắt đầu tìm phụ đề cho TMDB=$tmdbId")
 
         // 1. OpenSubtitles (Chỉ lấy tối đa 2 Việt + 2 Anh)
-        try {
+        if (!OPENSUBTITLES_API_KEY.startsWith("YOUR_")) try {
             val query = if (title != null) URLEncoder.encode(title, "UTF-8") else ""
             val url = if (tmdbId != null) {
                 "https://api.opensubtitles.com/api/v1/subtitles?tmdb_id=$tmdbId&languages=$LANGUAGES"
@@ -52,7 +51,7 @@ object SubtitleFetcher {
                     val fileId = files.optJSONObject(0)?.optInt("file_id") ?: continue
                     val downloadUrl = getOpenSubtitlesDownloadUrl(fileId) ?: continue
 
-                    subtitleCallback.invoke(newSubtitleFile(SubtitleHelper.fromTwoLettersToLanguage(lang) ?: lang, downloadUrl))
+                    subtitleCallback.invoke(SubtitleFile(SubtitleHelper.fromTwoLettersToLanguage(lang) ?: lang, downloadUrl))
                     ClipboardLogger.logAndCopy("SUBS-OS", "✓ Đã thêm phụ đề: $lang")
                     
                     if (lang == "vi") viCount++
@@ -60,12 +59,12 @@ object SubtitleFetcher {
                     if (viCount >= 2 && enCount >= 2) break
                 }
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             ClipboardLogger.logAndCopy("SUBS-OS", "✗ Lỗi: ${e.message?.take(50)}")
         }
 
         // 2. SubDL (Tương tự, giới hạn số lượng)
-        try {
+        if (!SUBDL_API_KEY.startsWith("YOUR_")) try {
             val query = if (title != null) URLEncoder.encode(title, "UTF-8") else ""
             val url = if (tmdbId != null) {
                 "https://api.subdl.com/api/v1/subtitles?api_key=$SUBDL_API_KEY&tmdb_id=$tmdbId&languages=$LANGUAGES"
@@ -92,7 +91,7 @@ object SubtitleFetcher {
                         if (urlPath.isBlank()) continue
 
                         val downloadUrl = "https://dl.subdl.com$urlPath"
-                        subtitleCallback.invoke(newSubtitleFile(SubtitleHelper.fromTwoLettersToLanguage(lang) ?: lang, downloadUrl))
+                        subtitleCallback.invoke(SubtitleFile(SubtitleHelper.fromTwoLettersToLanguage(lang) ?: lang, downloadUrl))
                         ClipboardLogger.logAndCopy("SUBS-SDL", "✓ Đã thêm phụ đề: $lang")
                         
                         if (lang == "vi") viCount++
@@ -101,7 +100,7 @@ object SubtitleFetcher {
                     }
                 }
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             ClipboardLogger.logAndCopy("SUBS-SDL", "✗ Lỗi: ${e.message?.take(50)}")
         }
     }
