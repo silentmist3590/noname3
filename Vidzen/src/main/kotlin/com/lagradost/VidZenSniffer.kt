@@ -145,7 +145,7 @@ object VidZenSniffer {
 
                     fun scheduleAfter(ms: Long) {
                         // Đã bỏ delay — cleanup ngay sau 800ms cho ExoPlayer không bị chặn
-                        main.postDelayed({ cleanup() }, 800L)
+                        main.postDelayed({ cleanup() }, 300L)
                     }
 
                     // addHit nhận 3 tham số (đã bao gồm cookie)
