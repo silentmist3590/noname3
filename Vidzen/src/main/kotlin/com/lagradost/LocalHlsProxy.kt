@@ -168,6 +168,7 @@ object LocalHlsProxy {
                     // === SEGMENT ===
                     val rawCt = response.header("Content-Type").orEmpty()
                     val ct = when {
+                        peekStr.startsWith("WEBVTT") -> "text/vtt"
                         remoteUrl.contains(".m4s", true) -> "video/iso.segment"
                         remoteUrl.contains(".mp4", true) -> "video/mp4"
                         remoteUrl.contains(".vtt", true) -> "text/vtt"
@@ -195,7 +196,7 @@ object LocalHlsProxy {
                         var off = 0
                         var outCt = ct
                         if (isMp4) {
-                            outCt = if (ct.startsWith("audio/")) ct else "video/mp4"
+                            outCt = if (ct.startsWith("audio/")) "audio/mp4" else "video/mp4"
                         } else if (ct == "video/mp2t" && n > 0 && first[0] != 0x47.toByte()) {
                             val lim = minOf(n - 376, 8192)
                             for (i in 0 until lim) {
