@@ -164,109 +164,90 @@ class VidZenProvider : MainAPI() {
     // LOAD LINKS — Sniff qua WebView, thử M3U8Helper, fallback emit
     // =====================================================================
     override suspend fun loadLinks(
-        data: String,
-        isCasting: Boolean,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        ClipboardLogger.reset()
-        ClipboardLogger.logAndCopy("=== PLAY ===", "data=$data")
+    data: String,
+    isCasting: Boolean,
+    subtitleCallback: (SubtitleFile) -> Unit,
+    callback: (ExtractorLink) -> Unit
+): Boolean {
+    ClipboardLogger.reset()
+    ClipboardLogger.logAndCopy("=== PLAY ===", "data=$data")
 
-        // 1. Tự động tải phụ đề
-        val tmdbId = Regex("""/(movie|tv)/(\d+)""").find(data)?.groupValues?.get(2)
-        if (tmdbId != null) {
-            try {
-                SubtitleFetcher.fetchSubtitles(tmdbId, null, null, subtitleCallback)
-            } catch (t: Throwable) {
-                ClipboardLogger.logAndCopy("SUBS", "✗ ${t.message?.take(80)}")
-            }
-        }
-
-        // 2. Sniff qua WebView
-        val sniffed = try {
-            VidZenSniffer.sniff(
-                url = data,
-                referer = "$mainUrl/",
-                timeoutMs = 45_000L,
-                waitForResultsMs = 5_000L
-            )
+    val tmdbId = Regex("""/(movie|tv)/(\d+)""").find(data)?.groupValues?.get(2)
+    if (tmdbId != null) {
+        try {
+            SubtitleFetcher.fetchSubtitles(tmdbId, null, null, subtitleCallback)
         } catch (t: Throwable) {
-            ClipboardLogger.logAndCopy("SNIFF", "✗ ${t.message?.take(100)}")
-            emptyList()
+            ClipboardLogger.logAndCopy("SUBS", "✗ ${t.message?.take(80)}")
         }
-
-        ClipboardLogger.logAndCopy("SNIFF", "Bắt được ${sniffed.size} URL")
-
-        // 3. Lọc ứng viên tốt nhất
-        val candidates = sniffed
-            .filter {
-                it.url.contains("/api/stream/", true) ||
-                it.url.contains(".m3u8", true) ||
-                it.url.contains(".mp4", true)
-            }
-            .filterNot { it.url.contains(".js", true) }
-            .distinctBy { it.url }
-            .take(3)
-
-        if (candidates.isEmpty()) {
-            ClipboardLogger.logAndCopy("LINKS", "❌ Không có ứng viên nào")
-            return false
-        }
-
-        var emitted = false
-
-        for (hit in candidates) {
-            ClipboardLogger.logAndCopy("HIT", "${hit.url.take(120)}...")
-
-            // ---- CÁCH 1: M3U8Helper với timeout 5s (bóc variant con) ----
-            val helperLinks = withTimeoutOrNull(5_000L) {
-                try {
-                    M3u8Helper.generateM3u8(
-                        source = name,
-                        streamUrl = hit.url,
-                        referer = "$mainUrl/",
-                        headers = streamHeaders()
-                    )
-                } catch (t: Throwable) {
-                    ClipboardLogger.logAndCopy("M3U8-FAIL", "${t.message?.take(80)}")
-                    null
-                }
-            }
-
-            if (helperLinks != null && helperLinks.isNotEmpty()) {
-                helperLinks.forEach { callback(it); emitted = true }
-                ClipboardLogger.logAndCopy("M3U8", "✓ ${helperLinks.size} variant từ ${hit.url.take(60)}")
-                break
-            }
-
-            // ---- CÁCH 2: Fallback emit trực tiếp ----
-            ClipboardLogger.logAndCopy("FALLBACK", "Emit trực tiếp: ${hit.url.take(80)}")
-            try {
-                callback(
-                    newExtractorLink(
-                        source = name,
-                        name = "$name • Stream",
-                        url = hit.url,
-                        type = if (hit.url.contains(".mp4", true))
-                            ExtractorLinkType.VIDEO
-                        else
-                            ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = "$mainUrl/"
-                        this.headers = streamHeaders()
-                    }
-                )
-                emitted = true
-                ClipboardLogger.logAndCopy("EMIT", "✓ Emit thành công")
-                break
-            } catch (t: Throwable) {
-                ClipboardLogger.logAndCopy("EMIT-FAIL", "${t.message?.take(80)}")
-            }
-        }
-
-        if (!emitted) ClipboardLogger.logAndCopy("LINKS", "❌ Không emit được link nào")
-        return emitted
     }
+
+    val sniffed = try {
+        VidZenSniffer.sniff(
+            url = data,
+            referer = "$mainUrl/",
+            timeoutMs = 45_000L,
+            waitForResultsMs = 5_000L
+        )
+    } catch (t: Throwable) {
+        ClipboardLogger.logAndCopy("SNIFF", "✗ ${t.message?.take(80)}")
+        emptyList()
+    }
+
+    ClipboardLogger.logAndCopy("SNIFF", "Bắt được ${sniffed.size} URL")
+
+    val candidates = sniffed
+        .filter {
+            it.url.contains("/api/stream/", true) ||
+            it.url.contains(".m3u8", true) ||
+            it.url.contains(".mp4", true)
+        }
+        .filterNot { it.url.contains(".js", true) }
+        .distinctBy { it.url }
+        .take(3)
+
+    if (candidates.isEmpty()) return false
+
+    val headers = streamHeaders()
+    LocalHlsProxy.setDefaultHeaders(headers)
+
+    for (hit in candidates) {
+        ClipboardLogger.logAndCopy("HIT", "${hit.url.take(100)}...")
+
+        // Kiểm tra upstream fetch được không
+        val checkOk = try {
+            val resp = app.get(hit.url, headers = headers)
+            ClipboardLogger.logAndCopy("CHECK", "code=${resp.code} size=${resp.text.length}")
+            resp.code in 200..299
+        } catch (t: Throwable) {
+            ClipboardLogger.logAndCopy("CHECK-FAIL", "${t.message?.take(80)}")
+            false
+        }
+        if (!checkOk) continue
+
+        // Proxy qua localhost
+        val proxyUrl = LocalHlsProxy.proxyUrl(hit.url)
+        ClipboardLogger.logAndCopy("PROXY", proxyUrl.take(120))
+
+        try {
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = "$name • Proxied HLS",
+                    url = proxyUrl,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.referer = "$mainUrl/"
+                    this.headers = emptyMap()
+                }
+            )
+            ClipboardLogger.logAndCopy("EMIT", "✓ Emit proxy URL")
+            return true
+        } catch (t: Throwable) {
+            ClipboardLogger.logAndCopy("EMIT-FAIL", "${t.message?.take(80)}")
+        }
+    }
+    return false
+}
 
     // =====================================================================
     // TMDB Data Models
