@@ -13,7 +13,7 @@ object SubtitleFetcher {
 
     // ⚠️ ĐIỀN API KEY CỦA BẠN VÀO ĐÂY
     private const val OPENSUBTITLES_API_KEY = "YOUR_OPENSUBTITLES_API_KEY"
-    private const val SUBDL_API_KEY = "YOUR_SUBDL_API_KEY"
+    private const val SUBDL_API_KEY = "xHeOWlCfS9o4EKmK7OwbeOBIhfbIHr2Y"
 
     // Ưu tiên Tiếng Việt (vi) trước, sau đó Tiếng Anh (en)
     private const val LANGUAGES = "vi,en" 
