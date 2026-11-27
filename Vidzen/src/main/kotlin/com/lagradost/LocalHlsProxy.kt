@@ -140,7 +140,7 @@ object LocalHlsProxy {
                     input.reset()
                     val peekStr = String(peek, 0, pn, Charsets.ISO_8859_1).trimStart('\uFEFF', 'ï', '»', '¿', ' ', '\r', '\n', '\t')
                     val isM3u8 = code in 200..299 && peekStr.startsWith("#EXTM3U")
-                    if (logCount++ < 14) {
+                    if (logCount++ < 40 && !isM3u8) {
                         ClipboardLogger.logAndCopy(
                             "PX",
                             "$method code=$code ct=${response.header("Content-Type")} len=${response.header("Content-Length")} " +
@@ -151,7 +151,7 @@ object LocalHlsProxy {
                     // === M3U8: rewrite — luôn trả 200 ===
                     if (isM3u8) {
                         val text = String(input.readBytes(), Charsets.UTF_8)
-                        if (playlistLogged++ < 2) ClipboardLogger.logAndCopy("PLAYLIST", text.take(500).replace("\n", " | "))
+                        if (playlistLogged++ < 7) ClipboardLogger.logAndCopy("PLAYLIST", text.lines().filter { it.startsWith("#EXT-X-MAP") || it.startsWith("#EXT-X-KEY") || it.startsWith("#EXT-X-BYTERANGE") || it.startsWith("#EXT-X-STREAM-INF") || it.startsWith("#EXT-X-TARGETDURATION") || it.startsWith("#EXT-X-PLAYLIST-TYPE") || it.startsWith("#EXT-X-DISCONTINUITY") || it.startsWith("#EXTINF") }.take(12).joinToString(" | ") { it.take(110) } + " || total=" + text.length + " segs=" + text.lines().count { it.startsWith("#EXTINF") })
                         val rewritten = rewriteM3u8(text, remoteUrl)
                         val bytes = rewritten.toByteArray(Charsets.UTF_8)
                         val out = socket.getOutputStream()
@@ -202,7 +202,20 @@ object LocalHlsProxy {
                                 if (first[i] == 0x47.toByte() && first[i + 188] == 0x47.toByte() && first[i + 376] == 0x47.toByte()) { off = i; break }
                             }
                         }
-                        if (segLogged++ < 6) ClipboardLogger.logAndCopy("SEG", "box=$box mp4=$isMp4 off=$off ct=$outCt n=$n")
+                        if (segLogged++ < 8) {
+                            val boxes = StringBuilder()
+                            var pos = 0
+                            var guard = 0
+                            while (pos + 8 <= n && guard++ < 10) {
+                                val sz = ((first[pos].toLong() and 0xff) shl 24) or ((first[pos + 1].toLong() and 0xff) shl 16) or ((first[pos + 2].toLong() and 0xff) shl 8) or (first[pos + 3].toLong() and 0xff)
+                                boxes.append(String(first, pos + 4, 4, Charsets.ISO_8859_1)).append(':').append(sz).append(' ')
+                                if (sz < 8) break
+                                pos += sz.toInt().coerceAtMost(Int.MAX_VALUE - pos)
+                            }
+                            val raw = String(first, 0, n, Charsets.ISO_8859_1)
+                            val flags = listOf("encv", "enca", "tenc", "cenc", "cbcs", "pssh", "avc1", "hvc1", "hev1", "mp4a", "av01", "vp09", "moov", "trex").filter { raw.contains(it) }
+                            ClipboardLogger.logAndCopy("SEG", "box=$box off=$off ct=$outCt n=$n boxes=[$boxes] has=$flags head=${first.take(24).joinToString("") { "%02x".format(it) }}")
+                        }
                         out.write("HTTP/1.1 200 OK\r\nContent-Type: $outCt\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n".toByteArray())
                         if (!method.equals("HEAD", true)) {
                             if (n > off) out.write(first, off, n - off)
