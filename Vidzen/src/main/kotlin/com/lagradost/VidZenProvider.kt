@@ -124,12 +124,6 @@ class VidZenProvider : MainAPI() {
 
         val tmdbId = Regex("""/(movie|tv)/(\d+)""").find(data)?.groupValues?.get(2)
         
-        // TÌM PHỤ ĐỀ CHẠY SONG SONG (Chỉ chờ tối đa 8 giây để tránh block video)
-        if (tmdbId != null) {
-            withTimeoutOrNull(8_000L) {
-                SubtitleFetcher.fetchSubtitles(tmdbId, null, null, subtitleCallback)
-            }
-        }
 
         val sniffed = try {
             VidZenSniffer.sniff(
@@ -183,6 +177,16 @@ class VidZenProvider : MainAPI() {
                     }
                 )
                 ClipboardLogger.logAndCopy("EMIT", "✓ Emit proxy URL")
+                // Phụ đề lấy SAU khi đã có link phát, chờ tối đa 4 giây
+                if (tmdbId != null) {
+                    try {
+                        withTimeoutOrNull(4_000L) {
+                            SubtitleFetcher.fetchSubtitles(tmdbId, null, null, subtitleCallback)
+                        }
+                    } catch (t: Throwable) {
+                        ClipboardLogger.logAndCopy("SUBS", "lỗi: ${t.message?.take(80)}")
+                    }
+                }
                 return true
             } catch (t: Throwable) {
                 ClipboardLogger.logAndCopy("EMIT-FAIL", "${t.message?.take(80)}")
