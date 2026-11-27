@@ -14,8 +14,6 @@ class VidZenProvider : MainAPI() {
     override val hasMainPage = true
     override var hasQuickSearch = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
-
-    // QUAN TRỌNG: tắt WebView player — tránh việc CloudStream tự mở WebView
     override val usesWebView = false
 
     private val tmdbApi = "https://tmdb-proxy.silentmist3590.workers.dev/3"
@@ -45,17 +43,12 @@ class VidZenProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         ClipboardLogger.reset()
         val url = if (page > 1) "${request.data}&page=$page" else request.data
-        ClipboardLogger.logAndCopy("HOME", "page=$page url=$url")
-
         val res = try {
             app.get(url, headers = tmdbHeaders()).parsedSafe<TmdbResponse>()
         } catch (t: Throwable) {
-            ClipboardLogger.logAndCopy("HOME", "✗ fail: ${t.message?.take(100)}")
             return newHomePageResponse(request.name, emptyList(), false)
         }
-
         val items = res?.results?.mapNotNull { it.toSearchResult() } ?: emptyList()
-        ClipboardLogger.logAndCopy("HOME", "→ ${items.size} items")
         return newHomePageResponse(request.name, items, false)
     }
 
@@ -65,18 +58,12 @@ class VidZenProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         ClipboardLogger.reset()
         val url = "$tmdbApi/search/multi?api_key=$tmdbKey&query=${URLEncoder.encode(query, "UTF-8")}"
-        ClipboardLogger.logAndCopy("SEARCH", "query=$query")
-
         val res = try {
             app.get(url, headers = tmdbHeaders()).parsedSafe<TmdbResponse>()
         } catch (t: Throwable) {
-            ClipboardLogger.logAndCopy("SEARCH", "✗ fail: ${t.message?.take(100)}")
             return emptyList()
         }
-
-        val items = res?.results?.mapNotNull { it.toSearchResult() } ?: emptyList()
-        ClipboardLogger.logAndCopy("SEARCH", "→ ${items.size} results")
-        return items
+        return res?.results?.mapNotNull { it.toSearchResult() } ?: emptyList()
     }
 
     private fun TmdbItem.toSearchResult(): SearchResponse? {
@@ -105,22 +92,14 @@ class VidZenProvider : MainAPI() {
     // LOAD
     // =====================================================================
     override suspend fun load(url: String): LoadResponse? {
-        ClipboardLogger.logAndCopy("LOAD", "url=$url")
         val isTv = url.contains("/tv/")
-        val tmdbId = Regex("""/(movie|tv)/(\d+)""").find(url)?.groupValues?.get(2) ?: run {
-            ClipboardLogger.logAndCopy("LOAD", "✗ Không lấy được TMDB ID")
-            return null
-        }
-
+        val tmdbId = Regex("""/(movie|tv)/(\d+)""").find(url)?.groupValues?.get(2) ?: return null
         val type = if (isTv) "tv" else "movie"
         val metaUrl = "$tmdbApi/$type/$tmdbId?api_key=$tmdbKey"
 
         val meta = try {
             app.get(metaUrl, headers = tmdbHeaders()).parsedSafe<TmdbDetail>()
-        } catch (t: Throwable) {
-            ClipboardLogger.logAndCopy("LOAD", "✗ meta fail: ${t.message?.take(100)}")
-            null
-        }
+        } catch (t: Throwable) { null }
 
         val title = meta?.title ?: meta?.name ?: "Unknown"
         val poster = meta?.posterPath?.let { "https://image.tmdb.org/t/p/w500$it" }
@@ -143,8 +122,6 @@ class VidZenProvider : MainAPI() {
             } catch (_: Throwable) {}
         }
 
-        ClipboardLogger.logAndCopy("LOAD", "✓ $title | TMDB=$tmdbId | eps=${episodes.size}")
-
         return if (isTv) {
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
                 this.posterUrl = poster
@@ -161,121 +138,114 @@ class VidZenProvider : MainAPI() {
     }
 
     // =====================================================================
-    // LOAD LINKS — Sniff qua WebView, thử M3U8Helper, fallback emit
+    // LOAD LINKS
     // =====================================================================
     override suspend fun loadLinks(
-    data: String,
-    isCasting: Boolean,
-    subtitleCallback: (SubtitleFile) -> Unit,
-    callback: (ExtractorLink) -> Unit
-): Boolean {
-    ClipboardLogger.reset()
-    ClipboardLogger.logAndCopy("=== PLAY ===", "data=$data")
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        ClipboardLogger.reset()
+        ClipboardLogger.logAndCopy("=== PLAY ===", "data=$data")
 
-    val tmdbId = Regex("""/(movie|tv)/(\d+)""").find(data)?.groupValues?.get(2)
-    if (tmdbId != null) {
-        try {
-            SubtitleFetcher.fetchSubtitles(tmdbId, null, null, subtitleCallback)
-        } catch (t: Throwable) {
-            ClipboardLogger.logAndCopy("SUBS", "✗ ${t.message?.take(80)}")
+        // Lấy TMDB ID và Tên phim để tìm phụ đề
+        val tmdbId = Regex("""/(movie|tv)/(\d+)""").find(data)?.groupValues?.get(2)
+        
+        // Cố gắng lấy title từ TMDB
+        var title: String? = null
+        if (tmdbId != null) {
+            val type = if (data.contains("/tv/")) "tv" else "movie"
+            try {
+                val meta = app.get("$tmdbApi/$type/$tmdbId?api_key=$tmdbKey", headers = tmdbHeaders()).parsedSafe<TmdbDetail>()
+                title = meta?.title ?: meta?.name
+            } catch (_: Throwable) {}
         }
-    }
 
-    val sniffed = try {
-        VidZenSniffer.sniff(
-            url = data,
-            referer = "$mainUrl/",
-            timeoutMs = 45_000L,
-            waitForResultsMs = 5_000L
-        )
-    } catch (t: Throwable) {
-        ClipboardLogger.logAndCopy("SNIFF", "✗ ${t.message?.take(80)}")
-        emptyList()
-    }
-
-    ClipboardLogger.logAndCopy("SNIFF", "Bắt được ${sniffed.size} URL")
-
-    val candidates = sniffed
-        .filter {
-            it.url.contains("/api/stream/", true) ||
-            it.url.contains(".m3u8", true) ||
-            it.url.contains(".mp4", true)
+        // GỌI TẢI PHỤ ĐỀ (Ưu tiên Việt > Anh)
+        if (tmdbId != null || title != null) {
+            SubtitleFetcher.fetchSubtitles(tmdbId, title, null, subtitleCallback)
         }
-        .filterNot { it.url.contains(".js", true) }
-        .distinctBy { it.url }
-        .take(3)
 
-    if (candidates.isEmpty()) return false
-
-    val headers = streamHeaders()
-    LocalHlsProxy.setDefaultHeaders(headers)
-
-    for (hit in candidates) {
-        ClipboardLogger.logAndCopy("HIT", "${hit.url.take(100)}...")
-
-        // Kiểm tra upstream fetch được không
-        val checkOk = try {
-            val resp = app.get(hit.url, headers = headers)
-            ClipboardLogger.logAndCopy("CHECK", "code=${resp.code} size=${resp.text.length}")
-            resp.code in 200..299
-        } catch (t: Throwable) {
-            ClipboardLogger.logAndCopy("CHECK-FAIL", "${t.message?.take(80)}")
-            false
-        }
-        if (!checkOk) continue
-
-        // Proxy qua localhost
-        val proxyUrl = LocalHlsProxy.proxyUrl(hit.url)
-        ClipboardLogger.logAndCopy("PROXY", proxyUrl.take(120))
-
-        try {
-            callback(
-                newExtractorLink(
-                    source = name,
-                    name = "$name • Proxied HLS",
-                    url = proxyUrl,
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    this.referer = "$mainUrl/"
-                    this.headers = emptyMap()
-                }
+        // --- PHẦN SNIFF VIDEO ---
+        val sniffed = try {
+            VidZenSniffer.sniff(
+                url = data,
+                referer = "$mainUrl/",
+                timeoutMs = 45_000L,
+                waitForResultsMs = 5_000L
             )
-            ClipboardLogger.logAndCopy("EMIT", "✓ Emit proxy URL")
-            return true
-        } catch (t: Throwable) {
-            ClipboardLogger.logAndCopy("EMIT-FAIL", "${t.message?.take(80)}")
+        } catch (t: Throwable) { emptyList() }
+
+        ClipboardLogger.logAndCopy("SNIFF", "Bắt được ${sniffed.size} URL")
+
+        val candidates = sniffed
+            .filter {
+                it.url.contains("/api/stream/", true) ||
+                it.url.contains(".m3u8", true) ||
+                it.url.contains(".mp4", true)
+            }
+            .filterNot { it.url.contains(".js", true) }
+            .distinctBy { it.url }
+            .take(3)
+
+        if (candidates.isEmpty()) return false
+
+        val headers = streamHeaders()
+        LocalHlsProxy.setDefaultHeaders(headers)
+
+        for (hit in candidates) {
+            ClipboardLogger.logAndCopy("HIT", "${hit.url.take(100)}...")
+
+            val checkOk = try {
+                val resp = app.get(hit.url, headers = headers)
+                resp.code in 200..299
+            } catch (t: Throwable) { false }
+            
+            if (!checkOk) continue
+
+            val proxyUrl = LocalHlsProxy.proxyUrl(hit.url)
+            ClipboardLogger.logAndCopy("PROXY", proxyUrl.take(120))
+
+            try {
+                callback(
+                    newExtractorLink(
+                        source = name,
+                        name = "$name • Proxied HLS",
+                        url = proxyUrl,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = "$mainUrl/"
+                        this.headers = emptyMap()
+                    }
+                )
+                ClipboardLogger.logAndCopy("EMIT", "✓ Emit proxy URL")
+                return true
+            } catch (t: Throwable) {
+                ClipboardLogger.logAndCopy("EMIT-FAIL", "${t.message?.take(80)}")
+            }
         }
+        return false
     }
-    return false
-}
 
     // =====================================================================
     // TMDB Data Models
     // =====================================================================
     data class TmdbResponse(val results: List<TmdbItem>?)
-
     data class TmdbItem(
-        val id: Int?,
-        val title: String?,
-        val name: String?,
+        val id: Int?, val title: String?, val name: String?,
         @com.fasterxml.jackson.annotation.JsonProperty("media_type") val mediaType: String?,
         @com.fasterxml.jackson.annotation.JsonProperty("poster_path") val posterPath: String?,
         @com.fasterxml.jackson.annotation.JsonProperty("release_date") val releaseDate: String?,
         @com.fasterxml.jackson.annotation.JsonProperty("first_air_date") val firstAirDate: String?
     )
-
     data class TmdbDetail(
-        val id: Int?,
-        val title: String?,
-        val name: String?,
-        val overview: String?,
+        val id: Int?, val title: String?, val name: String?, val overview: String?,
         @com.fasterxml.jackson.annotation.JsonProperty("poster_path") val posterPath: String?,
         @com.fasterxml.jackson.annotation.JsonProperty("release_date") val releaseDate: String?,
         @com.fasterxml.jackson.annotation.JsonProperty("first_air_date") val firstAirDate: String?
     )
-
     data class TmdbSeason(val episodes: List<TmdbEpisode>?)
-
     data class TmdbEpisode(
         @com.fasterxml.jackson.annotation.JsonProperty("episode_number") val episodeNumber: Int?
     )
