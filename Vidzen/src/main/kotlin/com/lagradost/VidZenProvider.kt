@@ -3,7 +3,6 @@ package com.lagradost
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
-import kotlinx.coroutines.withTimeoutOrNull // Thêm import này
 import org.json.JSONObject
 import java.net.URLEncoder
 
@@ -18,7 +17,6 @@ class VidZenProvider : MainAPI() {
 
     private val tmdbApi = "https://tmdb-proxy.silentmist3590.workers.dev/3"
     private val tmdbKey = "c3d997893bf55c01f39f821b53781547"
-    private val cfKiller = CloudflareKiller()
 
     override val mainPage = mainPageOf(
         "$tmdbApi/trending/all/week?api_key=$tmdbKey" to "Trending",
@@ -30,8 +28,130 @@ class VidZenProvider : MainAPI() {
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     )
 
-    // ... (getMainPage, search, load giữ nguyên) ...
+    // ============================================================
+    // HOME PAGE
+    // ============================================================
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        ClipboardLogger.reset()
+        val url = if (page > 1) "${request.data}&page=$page" else request.data
+        ClipboardLogger.logAndCopy("HOME", "page=$page | $url")
 
+        val res = try {
+            app.get(url, headers = headers()).parsedSafe<TmdbResponse>()
+        } catch (t: Throwable) {
+            ClipboardLogger.logAndCopy("HOME", "✗ fetch fail: ${t.message?.take(100)}")
+            return newHomePageResponse(request.name, emptyList(), false)
+        }
+
+        val items = res?.results?.mapNotNull { it.toSearchResult() } ?: emptyList()
+        ClipboardLogger.logAndCopy("HOME", "→ ${items.size} items")
+        return newHomePageResponse(request.name, items, false)
+    }
+
+    // ============================================================
+    // SEARCH
+    // ============================================================
+    override suspend fun search(query: String): List<SearchResponse> {
+        ClipboardLogger.reset()
+        val url = "$tmdbApi/search/multi?api_key=$tmdbKey&query=${URLEncoder.encode(query, "UTF-8")}"
+        ClipboardLogger.logAndCopy("SEARCH", "query=$query")
+
+        val res = try {
+            app.get(url, headers = headers()).parsedSafe<TmdbResponse>()
+        } catch (t: Throwable) {
+            ClipboardLogger.logAndCopy("SEARCH", "✗ fail: ${t.message?.take(100)}")
+            return emptyList()
+        }
+
+        val items = res?.results?.mapNotNull { it.toSearchResult() } ?: emptyList()
+        ClipboardLogger.logAndCopy("SEARCH", "→ ${items.size} results")
+        return items
+    }
+
+    private fun TmdbItem.toSearchResult(): SearchResponse? {
+        val tmdbId = id ?: return null
+        val title = title ?: name ?: return null
+        val type = mediaType ?: if (title.isNotBlank()) "movie" else "tv"
+        val isTv = type == "tv"
+
+        val poster = posterPath?.let { "https://image.tmdb.org/t/p/w500$it" }
+        val year = (releaseDate ?: firstAirDate)?.take(4)?.toIntOrNull()
+
+        return if (isTv) {
+            newTvSeriesSearchResponse(title, "$mainUrl/tv/$tmdbId", TvType.TvSeries) {
+                this.posterUrl = poster
+                this.year = year
+            }
+        } else {
+            newMovieSearchResponse(title, "$mainUrl/movie/$tmdbId", TvType.Movie) {
+                this.posterUrl = poster
+                this.year = year
+            }
+        }
+    }
+
+    // ============================================================
+    // LOAD
+    // ============================================================
+    override suspend fun load(url: String): LoadResponse? {
+        ClipboardLogger.logAndCopy("LOAD", "url=$url")
+        val isTv = url.contains("/tv/")
+        val tmdbId = Regex("""/(movie|tv)/(\d+)""").find(url)?.groupValues?.get(2) ?: run {
+            ClipboardLogger.logAndCopy("LOAD", "✗ Không lấy được TMDB ID")
+            return null
+        }
+
+        val type = if (isTv) "tv" else "movie"
+        val metaUrl = "$tmdbApi/$type/$tmdbId?api_key=$tmdbKey"
+
+        val meta = try {
+            app.get(metaUrl, headers = headers()).parsedSafe<TmdbDetail>()
+        } catch (t: Throwable) {
+            ClipboardLogger.logAndCopy("LOAD", "✗ meta fail: ${t.message?.take(100)}")
+            null
+        }
+
+        val title = meta?.title ?: meta?.name ?: "Unknown"
+        val poster = meta?.posterPath?.let { "https://image.tmdb.org/t/p/w500$it" }
+        val plot = meta?.overview
+        val year = (meta?.releaseDate ?: meta?.firstAirDate)?.take(4)?.toIntOrNull()
+
+        val episodes = mutableListOf<Episode>()
+        if (isTv) {
+            try {
+                val seasonUrl = "$tmdbApi/tv/$tmdbId/season/1?api_key=$tmdbKey"
+                val season = app.get(seasonUrl, headers = headers()).parsedSafe<TmdbSeason>()
+                season?.episodes?.forEach { ep ->
+                    val epNum = ep.episodeNumber ?: return@forEach
+                    episodes.add(newEpisode("$mainUrl/tv/$tmdbId/1/$epNum") {
+                        this.name = "Tập $epNum"
+                        this.season = 1
+                        this.episode = epNum
+                    })
+                }
+            } catch (_: Throwable) {}
+        }
+
+        ClipboardLogger.logAndCopy("LOAD", "✓ $title | TMDB=$tmdbId | eps=${episodes.size}")
+
+        return if (isTv) {
+            newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+                this.posterUrl = poster
+                this.plot = plot
+                this.year = year
+            }
+        } else {
+            newMovieLoadResponse(title, url, TvType.Movie, url) {
+                this.posterUrl = poster
+                this.plot = plot
+                this.year = year
+            }
+        }
+    }
+
+    // ============================================================
+    // LOAD LINKS
+    // ============================================================
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -46,7 +166,7 @@ class VidZenProvider : MainAPI() {
             SubtitleFetcher.fetchSubtitles(tmdbId, null, null, subtitleCallback)
         }
 
-        // 1. Sniff URL từ WebView
+        // Sniff qua WebView
         val sniffed = VidZenSniffer.sniff(
             url = data,
             referer = "$mainUrl/",
@@ -76,24 +196,19 @@ class VidZenProvider : MainAPI() {
                 "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
         for (hit in candidates) {
-            ClipboardLogger.logAndCopy("HIT", "[${hit.source}] ${hit.url.take(100)}...")
+            ClipboardLogger.logAndCopy("HIT", "${hit.url.take(100)}...")
 
-            // 2. Dùng CloudflareKiller để lấy cookie cf_clearance
-            var cookie = ""
+            // Lấy cookie qua CloudflareKiller — đọc từ response.cookies (không phải CookieManager)
+            var cookie = hit.cookies
             try {
-                // Thực hiện một request qua CloudflareKiller để nó giải challenge và lưu cookie
-                withTimeoutOrNull(10_000L) {
-                    app.get(hit.url, interceptor = cfKiller)
-                }
-                // Lấy cookie từ CookieManager sau khi CloudflareKiller đã chạy
-                cookie = android.webkit.CookieManager.getInstance()
-                    .getCookie(hit.url).orEmpty()
-                ClipboardLogger.logAndCopy("CF-COOKIE", "cookie.len=${cookie.length}")
+                val cfResp = app.get(hit.url, interceptor = CloudflareKiller())
+                val cfCookieStr = cfResp.cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
+                ClipboardLogger.logAndCopy("CF", "code=${cfResp.code} | cfCookie.len=${cfCookieStr.length}")
+                if (cfCookieStr.isNotBlank()) cookie = cfCookieStr
             } catch (t: Throwable) {
                 ClipboardLogger.logAndCopy("CF-FAIL", "${t.message?.take(80)}")
             }
 
-            // 3. Emit link với đầy đủ header (bao gồm cookie nếu có)
             try {
                 callback(
                     newExtractorLink(
@@ -105,20 +220,18 @@ class VidZenProvider : MainAPI() {
                         else
                             ExtractorLinkType.M3U8
                     ) {
-                        this.referer = hit.referer
-                        val headerMap = mutableMapOf(
-                            "Referer" to hit.referer,
+                        this.referer = "$mainUrl/"
+                        val h = mutableMapOf(
+                            "Referer" to "$mainUrl/",
                             "Origin" to mainUrl,
                             "User-Agent" to ua
                         )
-                        if (cookie.isNotBlank()) {
-                            headerMap["Cookie"] = cookie
-                        }
-                        this.headers = headerMap
+                        if (cookie.isNotBlank()) h["Cookie"] = cookie
+                        this.headers = h
                     }
                 )
                 emitted = true
-                ClipboardLogger.logAndCopy("EMIT", "✓ Emit thành công (cookie.len=${cookie.length})")
+                ClipboardLogger.logAndCopy("EMIT", "✓ cookie.len=${cookie.length}")
                 break
             } catch (t: Throwable) {
                 ClipboardLogger.logAndCopy("EMIT-FAIL", "${t.message?.take(80)}")
@@ -129,5 +242,25 @@ class VidZenProvider : MainAPI() {
         return emitted
     }
 
-    // ... (Các data class giữ nguyên) ...
+    // ============================================================
+    // TMDB Data Models
+    // ============================================================
+    data class TmdbResponse(val results: List<TmdbItem>?)
+    data class TmdbItem(
+        val id: Int?, val title: String?, val name: String?,
+        @com.fasterxml.jackson.annotation.JsonProperty("media_type") val mediaType: String?,
+        @com.fasterxml.jackson.annotation.JsonProperty("poster_path") val posterPath: String?,
+        @com.fasterxml.jackson.annotation.JsonProperty("release_date") val releaseDate: String?,
+        @com.fasterxml.jackson.annotation.JsonProperty("first_air_date") val firstAirDate: String?
+    )
+    data class TmdbDetail(
+        val id: Int?, val title: String?, val name: String?, val overview: String?,
+        @com.fasterxml.jackson.annotation.JsonProperty("poster_path") val posterPath: String?,
+        @com.fasterxml.jackson.annotation.JsonProperty("release_date") val releaseDate: String?,
+        @com.fasterxml.jackson.annotation.JsonProperty("first_air_date") val firstAirDate: String?
+    )
+    data class TmdbSeason(val episodes: List<TmdbEpisode>?)
+    data class TmdbEpisode(
+        @com.fasterxml.jackson.annotation.JsonProperty("episode_number") val episodeNumber: Int?
+    )
 }
