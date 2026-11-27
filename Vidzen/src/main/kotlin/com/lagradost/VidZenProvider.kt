@@ -12,15 +12,14 @@ class VidZenProvider : MainAPI() {
     override var name = "VidZen"
     override var lang = "en"
     override val hasMainPage = true
-    override var hasQuickSearch = true
+    // ĐÃ TẮT QUICK SEARCH ĐỂ TRÁNH CRASH
+    override var hasQuickSearch = false 
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
     override val usesWebView = false
 
     private val tmdbApi = "https://tmdb-proxy.silentmist3590.workers.dev/3"
     private val tmdbKey = "c3d997893bf55c01f39f821b53781547"
-
-    private val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    private val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
     override val mainPage = mainPageOf(
         "$tmdbApi/trending/all/week?api_key=$tmdbKey" to "Trending",
@@ -37,32 +36,22 @@ class VidZenProvider : MainAPI() {
         "Accept" to "*/*"
     )
 
-    // =====================================================================
-    // HOME PAGE
-    // =====================================================================
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         ClipboardLogger.reset()
         val url = if (page > 1) "${request.data}&page=$page" else request.data
         val res = try {
             app.get(url, headers = tmdbHeaders()).parsedSafe<TmdbResponse>()
-        } catch (t: Throwable) {
-            return newHomePageResponse(request.name, emptyList(), false)
-        }
+        } catch (t: Throwable) { null }
         val items = res?.results?.mapNotNull { it.toSearchResult() } ?: emptyList()
         return newHomePageResponse(request.name, items, false)
     }
 
-    // =====================================================================
-    // SEARCH
-    // =====================================================================
     override suspend fun search(query: String): List<SearchResponse> {
         ClipboardLogger.reset()
         val url = "$tmdbApi/search/multi?api_key=$tmdbKey&query=${URLEncoder.encode(query, "UTF-8")}"
         val res = try {
             app.get(url, headers = tmdbHeaders()).parsedSafe<TmdbResponse>()
-        } catch (t: Throwable) {
-            return emptyList()
-        }
+        } catch (t: Throwable) { null }
         return res?.results?.mapNotNull { it.toSearchResult() } ?: emptyList()
     }
 
@@ -77,29 +66,22 @@ class VidZenProvider : MainAPI() {
 
         return if (isTv) {
             newTvSeriesSearchResponse(title, "$mainUrl/tv/$tmdbId", TvType.TvSeries) {
-                this.posterUrl = poster
-                this.year = year
+                this.posterUrl = poster; this.year = year
             }
         } else {
             newMovieSearchResponse(title, "$mainUrl/movie/$tmdbId", TvType.Movie) {
-                this.posterUrl = poster
-                this.year = year
+                this.posterUrl = poster; this.year = year
             }
         }
     }
 
-    // =====================================================================
-    // LOAD
-    // =====================================================================
     override suspend fun load(url: String): LoadResponse? {
         val isTv = url.contains("/tv/")
         val tmdbId = Regex("""/(movie|tv)/(\d+)""").find(url)?.groupValues?.get(2) ?: return null
         val type = if (isTv) "tv" else "movie"
         val metaUrl = "$tmdbApi/$type/$tmdbId?api_key=$tmdbKey"
 
-        val meta = try {
-            app.get(metaUrl, headers = tmdbHeaders()).parsedSafe<TmdbDetail>()
-        } catch (t: Throwable) { null }
+        val meta = try { app.get(metaUrl, headers = tmdbHeaders()).parsedSafe<TmdbDetail>() } catch (t: Throwable) { null }
 
         val title = meta?.title ?: meta?.name ?: "Unknown"
         val poster = meta?.posterPath?.let { "https://image.tmdb.org/t/p/w500$it" }
@@ -114,9 +96,7 @@ class VidZenProvider : MainAPI() {
                 season?.episodes?.forEach { ep ->
                     val epNum = ep.episodeNumber ?: return@forEach
                     episodes.add(newEpisode("$mainUrl/tv/$tmdbId/1/$epNum") {
-                        this.name = "Tập $epNum"
-                        this.season = 1
-                        this.episode = epNum
+                        this.name = "Tập $epNum"; this.season = 1; this.episode = epNum
                     })
                 }
             } catch (_: Throwable) {}
@@ -124,22 +104,15 @@ class VidZenProvider : MainAPI() {
 
         return if (isTv) {
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                this.posterUrl = poster
-                this.plot = plot
-                this.year = year
+                this.posterUrl = poster; this.plot = plot; this.year = year
             }
         } else {
             newMovieLoadResponse(title, url, TvType.Movie, url) {
-                this.posterUrl = poster
-                this.plot = plot
-                this.year = year
+                this.posterUrl = poster; this.plot = plot; this.year = year
             }
         }
     }
 
-    // =====================================================================
-    // LOAD LINKS
-    // =====================================================================
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -149,25 +122,15 @@ class VidZenProvider : MainAPI() {
         ClipboardLogger.reset()
         ClipboardLogger.logAndCopy("=== PLAY ===", "data=$data")
 
-        // Lấy TMDB ID và Tên phim để tìm phụ đề
         val tmdbId = Regex("""/(movie|tv)/(\d+)""").find(data)?.groupValues?.get(2)
         
-        // Cố gắng lấy title từ TMDB
-        var title: String? = null
+        // TÌM PHỤ ĐỀ CHẠY SONG SONG (Chỉ chờ tối đa 8 giây để tránh block video)
         if (tmdbId != null) {
-            val type = if (data.contains("/tv/")) "tv" else "movie"
-            try {
-                val meta = app.get("$tmdbApi/$type/$tmdbId?api_key=$tmdbKey", headers = tmdbHeaders()).parsedSafe<TmdbDetail>()
-                title = meta?.title ?: meta?.name
-            } catch (_: Throwable) {}
+            withTimeoutOrNull(8_000L) {
+                SubtitleFetcher.fetchSubtitles(tmdbId, null, null, subtitleCallback)
+            }
         }
 
-        // GỌI TẢI PHỤ ĐỀ (Ưu tiên Việt > Anh)
-        if (tmdbId != null || title != null) {
-            SubtitleFetcher.fetchSubtitles(tmdbId, title, null, subtitleCallback)
-        }
-
-        // --- PHẦN SNIFF VIDEO ---
         val sniffed = try {
             VidZenSniffer.sniff(
                 url = data,
@@ -228,9 +191,6 @@ class VidZenProvider : MainAPI() {
         return false
     }
 
-    // =====================================================================
-    // TMDB Data Models
-    // =====================================================================
     data class TmdbResponse(val results: List<TmdbItem>?)
     data class TmdbItem(
         val id: Int?, val title: String?, val name: String?,
