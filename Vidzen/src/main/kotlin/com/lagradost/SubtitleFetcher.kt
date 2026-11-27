@@ -11,11 +11,8 @@ import java.net.URLEncoder
 
 object SubtitleFetcher {
 
-    // ⚠️ ĐIỀN API KEY CỦA BẠN VÀO ĐÂY
-    private const val OPENSUBTITLES_API_KEY = "OHFlEutMFovpvfcNEgdZ34pPIB2IptP6"
-    private const val SUBDL_API_KEY = "xHeOWlCfS9o4EKmK7OwbeOBIhfbIHr2Y"
-
-    // Ưu tiên Tiếng Việt (vi) trước, sau đó Tiếng Anh (en)
+    private const val OPENSUBTITLES_API_KEY = "YOUR_OPENSUBTITLES_API_KEY"
+    private const val SUBDL_API_KEY = "YOUR_SUBDL_API_KEY"
     private const val LANGUAGES = "vi,en" 
 
     suspend fun fetchSubtitles(
@@ -25,9 +22,9 @@ object SubtitleFetcher {
         subtitleCallback: (SubtitleFile) -> Unit
     ) {
         if (tmdbId == null && title == null) return
-        ClipboardLogger.logAndCopy("SUBS", "Bắt đầu tìm phụ đề (Ưu tiên Việt > Anh) cho TMDB=$tmdbId")
+        ClipboardLogger.logAndCopy("SUBS", "Bắt đầu tìm phụ đề cho TMDB=$tmdbId")
 
-        // 1. Tìm kiếm trên OpenSubtitles
+        // 1. OpenSubtitles (Chỉ lấy tối đa 2 Việt + 2 Anh)
         try {
             val query = if (title != null) URLEncoder.encode(title, "UTF-8") else ""
             val url = if (tmdbId != null) {
@@ -36,45 +33,38 @@ object SubtitleFetcher {
                 "https://api.opensubtitles.com/api/v1/subtitles?query=$query&languages=$LANGUAGES"
             }
 
-            val response = app.get(
-                url,
-                headers = mapOf(
-                    "Api-Key" to OPENSUBTITLES_API_KEY,
-                    "User-Agent" to "VidZen v1.0"
-                )
-            ).text
-
-            val json = JSONObject(response)
-            val dataArray = json.optJSONArray("data")
+            val response = app.get(url, headers = mapOf("Api-Key" to OPENSUBTITLES_API_KEY, "User-Agent" to "VidZen v1.0")).text
+            val dataArray = JSONObject(response).optJSONArray("data")
+            
             if (dataArray != null) {
+                var viCount = 0
+                var enCount = 0
                 for (i in 0 until dataArray.length()) {
                     val subObj = dataArray.optJSONObject(i) ?: continue
                     val attributes = subObj.optJSONObject("attributes") ?: continue
                     val files = attributes.optJSONArray("files") ?: continue
                     if (files.length() == 0) continue
 
-                    val fileId = files.optJSONObject(0)?.optInt("file_id") ?: continue
-                    val language = attributes.optString("language", "en")
-                    
-                    // Chỉ lấy tiếng Việt hoặc tiếng Anh
-                    if (language != "vi" && language != "en") continue
+                    val lang = attributes.optString("language", "en")
+                    if (lang == "vi" && viCount >= 2) continue
+                    if (lang == "en" && enCount >= 2) continue
 
+                    val fileId = files.optJSONObject(0)?.optInt("file_id") ?: continue
                     val downloadUrl = getOpenSubtitlesDownloadUrl(fileId) ?: continue
 
-                    subtitleCallback.invoke(
-                        newSubtitleFile(
-                            SubtitleHelper.fromTwoLettersToLanguage(language) ?: language,
-                            downloadUrl
-                        )
-                    )
-                    ClipboardLogger.logAndCopy("SUBS-OS", "✓ Đã thêm phụ đề: $language")
+                    subtitleCallback.invoke(newSubtitleFile(SubtitleHelper.fromTwoLettersToLanguage(lang) ?: lang, downloadUrl))
+                    ClipboardLogger.logAndCopy("SUBS-OS", "✓ Đã thêm phụ đề: $lang")
+                    
+                    if (lang == "vi") viCount++
+                    if (lang == "en") enCount++
+                    if (viCount >= 2 && enCount >= 2) break
                 }
             }
         } catch (e: Exception) {
-            ClipboardLogger.logAndCopy("SUBS-OS", "✗ Lỗi: ${e.message?.take(80)}")
+            ClipboardLogger.logAndCopy("SUBS-OS", "✗ Lỗi: ${e.message?.take(50)}")
         }
 
-        // 2. Tìm kiếm trên SubDL
+        // 2. SubDL (Tương tự, giới hạn số lượng)
         try {
             val query = if (title != null) URLEncoder.encode(title, "UTF-8") else ""
             val url = if (tmdbId != null) {
@@ -89,29 +79,30 @@ object SubtitleFetcher {
             if (json.optBoolean("status", false)) {
                 val subtitles = json.optJSONArray("subtitles")
                 if (subtitles != null) {
+                    var viCount = 0
+                    var enCount = 0
                     for (i in 0 until subtitles.length()) {
                         val sub = subtitles.optJSONObject(i) ?: continue
                         val lang = sub.optString("language", "en")
                         
-                        // Chỉ lấy tiếng Việt hoặc tiếng Anh
-                        if (lang != "vi" && lang != "en") continue
+                        if (lang == "vi" && viCount >= 2) continue
+                        if (lang == "en" && enCount >= 2) continue
 
                         val urlPath = sub.optString("url", "")
                         if (urlPath.isBlank()) continue
 
                         val downloadUrl = "https://dl.subdl.com$urlPath"
-                        subtitleCallback.invoke(
-                            newSubtitleFile(
-                                SubtitleHelper.fromTwoLettersToLanguage(lang) ?: lang,
-                                downloadUrl
-                            )
-                        )
+                        subtitleCallback.invoke(newSubtitleFile(SubtitleHelper.fromTwoLettersToLanguage(lang) ?: lang, downloadUrl))
                         ClipboardLogger.logAndCopy("SUBS-SDL", "✓ Đã thêm phụ đề: $lang")
+                        
+                        if (lang == "vi") viCount++
+                        if (lang == "en") enCount++
+                        if (viCount >= 2 && enCount >= 2) break
                     }
                 }
             }
         } catch (e: Exception) {
-            ClipboardLogger.logAndCopy("SUBS-SDL", "✗ Lỗi: ${e.message?.take(80)}")
+            ClipboardLogger.logAndCopy("SUBS-SDL", "✗ Lỗi: ${e.message?.take(50)}")
         }
     }
 
@@ -120,16 +111,10 @@ object SubtitleFetcher {
             val jsonBody = """{"file_id": $fileId}"""
             val response = app.post(
                 "https://api.opensubtitles.com/api/v1/download",
-                headers = mapOf(
-                    "Api-Key" to OPENSUBTITLES_API_KEY,
-                    "Content-Type" to "application/json"
-                ),
+                headers = mapOf("Api-Key" to OPENSUBTITLES_API_KEY, "Content-Type" to "application/json"),
                 requestBody = jsonBody.toRequestBody("application/json".toMediaType())
             ).text
             JSONObject(response).optString("link", null)
-        } catch (e: Exception) {
-            ClipboardLogger.logAndCopy("SUBS-OS-DL", "✗ Lỗi tải link: ${e.message?.take(50)}")
-            null
-        }
+        } catch (e: Exception) { null }
     }
 }
