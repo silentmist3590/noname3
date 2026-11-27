@@ -133,7 +133,9 @@ object VidZenSniffer {
                         try { CookieManager.getInstance().flush() } catch (_: Throwable) {}
                         main.post {
                             try { overlay.removeAllViews() } catch (_: Throwable) {}
-                            try { (overlay.parent as? ViewGroup)?.removeView(overlay) } catch (_: Throwable) {}
+                            try {
+                                (overlay.parent as? ViewGroup)?.removeView(overlay)
+                            } catch (_: Throwable) {}
                             try { webView.stopLoading() } catch (_: Throwable) {}
                             try { webView.loadUrl("about:blank") } catch (_: Throwable) {}
                             try { webView.destroy() } catch (_: Throwable) {}
@@ -142,11 +144,8 @@ object VidZenSniffer {
                     }
 
                     fun scheduleAfter(ms: Long) {
-                        main.postDelayed({
-                            val hasM3u8 = hits.keys.any { it.contains(".m3u8", true) }
-                            if (hasM3u8) cleanup()
-                            else main.postDelayed({ cleanup() }, 5000L)
-                        }, ms)
+                        // Đã bỏ delay — cleanup ngay sau 800ms cho ExoPlayer không bị chặn
+                        main.postDelayed({ cleanup() }, 800L)
                     }
 
                     // addHit nhận 3 tham số (đã bao gồm cookie)
@@ -179,6 +178,10 @@ object VidZenSniffer {
                                     CookieManager.getInstance().getCookie(u).orEmpty()
                                 } catch (_: Throwable) { "" }
                                 addHit(u, "network", cookie)
+                                // ĐÓNG NGAY khi có ≥1 link
+                                if (hits.isNotEmpty()) {
+                                    main.post { cleanup() }
+                                }
                             }
                             return null
                         }
