@@ -12,7 +12,7 @@ import java.net.URLEncoder
 object SubtitleFetcher {
 
     // ⚠️ ĐIỀN API KEY CỦA BẠN VÀO ĐÂY
-    private const val OPENSUBTITLES_API_KEY = "YOUR_OPENSUBTITLES_API_KEY"
+    private const val OPENSUBTITLES_API_KEY = "OHFlEutMFovpvfcNEgdZ34pPIB2IptP6"
     private const val SUBDL_API_KEY = "xHeOWlCfS9o4EKmK7OwbeOBIhfbIHr2Y"
 
     // Ưu tiên Tiếng Việt (vi) trước, sau đó Tiếng Anh (en)
