@@ -167,7 +167,7 @@ object VidZenSniffer {
                     }
 
                     webView.webViewClient = object : WebViewClient() {
-                        override fun shouldInterceptRequest(
+                         override fun shouldInterceptRequest(
                             view: WebView?,
                             request: WebResourceRequest?
                         ): WebResourceResponse? {
@@ -178,7 +178,7 @@ object VidZenSniffer {
                                     CookieManager.getInstance().getCookie(u).orEmpty()
                                 } catch (_: Throwable) { "" }
                                 addHit(u, "network", cookie)
-                                // ĐÓNG NGAY khi có ≥1 link
+                                // ĐÓNG NGAY khi có ≥1 link (không chờ 5s nữa)
                                 if (hits.isNotEmpty()) {
                                     main.post { cleanup() }
                                 }
