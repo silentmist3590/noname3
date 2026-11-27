@@ -8,7 +8,7 @@ cloudstream {
     language = "en"
     description = "VidZen - Next-Gen Streaming API"
     authors = listOf("YourName")
-    version = 9
+    version = 10
     status = 1
     tvTypes = listOf("Movie", "TvSeries")
 }
