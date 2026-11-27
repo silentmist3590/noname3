@@ -23,6 +23,8 @@ object LocalHlsProxy {
         .followSslRedirects(true)
         .build()
 
+    @Volatile private var logCount = 0
+    @Volatile private var playlistLogged = 0
     @Volatile private var defaultHeaders: Map<String, String> = emptyMap()
 
     fun setDefaultHeaders(headers: Map<String, String>) {
@@ -89,9 +91,7 @@ object LocalHlsProxy {
                     sendError(socket, 400, "Missing url")
                     return
                 }
-                val isM3u8 = remoteUrl.contains(".m3u8", true) ||
-                             remoteUrl.contains("/api/stream/", true) ||
-                             remoteUrl.contains("v1_", true)
+                // Playlist hay đoạn video: quyết định theo NỘI DUNG phản hồi (không đoán theo URL)
 
                 // Parse Range from client
                 val rangeHeader = requestHeaders["range"]
@@ -132,9 +132,25 @@ object LocalHlsProxy {
                 }
 
                 try {
+                    val input = java.io.BufferedInputStream(body.byteStream(), 64 * 1024)
+                    input.mark(32)
+                    val peek = ByteArray(16)
+                    val pn = input.read(peek).coerceAtLeast(0)
+                    input.reset()
+                    val peekStr = String(peek, 0, pn, Charsets.ISO_8859_1).trimStart('\uFEFF', 'ï', '»', '¿', ' ', '\r', '\n', '\t')
+                    val isM3u8 = code in 200..299 && peekStr.startsWith("#EXTM3U")
+                    if (logCount++ < 14) {
+                        ClipboardLogger.logAndCopy(
+                            "PX",
+                            "$method code=$code ct=${response.header("Content-Type")} len=${response.header("Content-Length")} " +
+                                "range=$rangeStart..$rangeEnd m3u8=$isM3u8 head=${peek.take(6).joinToString("") { "%02x".format(it) }} url=${remoteUrl.take(110)}"
+                        )
+                    }
+
                     // === M3U8: rewrite — luôn trả 200 ===
-                    if (isM3u8 && code in 200..299) {
-                        val text = body.string()
+                    if (isM3u8) {
+                        val text = String(input.readBytes(), Charsets.UTF_8)
+                        if (playlistLogged++ < 2) ClipboardLogger.logAndCopy("PLAYLIST", text.take(500).replace("\n", " | "))
                         val rewritten = rewriteM3u8(text, remoteUrl)
                         val bytes = rewritten.toByteArray(Charsets.UTF_8)
                         val out = socket.getOutputStream()
@@ -149,16 +165,44 @@ object LocalHlsProxy {
                     }
 
                     // === SEGMENT ===
+                    val rawCt = response.header("Content-Type").orEmpty()
                     val ct = when {
-                        remoteUrl.contains(".ts", true) -> "video/mp2t"
                         remoteUrl.contains(".m4s", true) -> "video/iso.segment"
                         remoteUrl.contains(".mp4", true) -> "video/mp4"
                         remoteUrl.contains(".vtt", true) -> "text/vtt"
                         remoteUrl.contains(".aac", true) -> "audio/aac"
-                        else -> response.header("Content-Type") ?: "application/octet-stream"
+                        remoteUrl.contains(".ts", true) -> "video/mp2t"
+                        rawCt.startsWith("image/") || rawCt.isBlank() || rawCt.contains("octet-stream") -> "video/mp2t"
+                        else -> rawCt
                     }
 
                     val out = socket.getOutputStream()
+
+                    // Case A0: 200 không Range -> bỏ phần đầu giả (ảnh/PNG...) tới khi gặp tín hiệu TS (0x47), rồi truyền NGAY
+                    if (code in 200..299 && rangeStart < 0 && ct == "video/mp2t") {
+                        val first = ByteArray(9000)
+                        var n = 0
+                        while (n < first.size) {
+                            val k = input.read(first, n, first.size - n)
+                            if (k < 0) break
+                            n += k
+                        }
+                        var off = 0
+                        if (n > 0 && first[0] != 0x47.toByte()) {
+                            val lim = minOf(n - 376, 8192)
+                            for (i in 0 until lim) {
+                                if (first[i] == 0x47.toByte() && first[i + 188] == 0x47.toByte() && first[i + 376] == 0x47.toByte()) { off = i; break }
+                            }
+                        }
+                        out.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n".toByteArray())
+                        if (!method.equals("HEAD", true)) {
+                            if (n > off) out.write(first, off, n - off)
+                            out.flush()
+                            streamBody(input, out, null)
+                        }
+                        out.flush()
+                        return
+                    }
 
                     // Case A: upstream hỗ trợ Range (206)
                     if (code == 206) {
@@ -173,7 +217,7 @@ object LocalHlsProxy {
                         out.write("Accept-Ranges: bytes\r\n".toByteArray())
                         out.write("Access-Control-Allow-Origin: *\r\n".toByteArray())
                         out.write("Connection: close\r\n\r\n".toByteArray())
-                        if (!method.equals("HEAD", true)) streamBody(body.byteStream(), out, null)
+                        if (!method.equals("HEAD", true)) streamBody(input, out, null)
                         out.flush()
                         Log.d(TAG, "206 done")
                         return
@@ -183,8 +227,7 @@ object LocalHlsProxy {
                     // → proxy tự skip start bytes và trả 206
                     if (code in 200..299 && rangeStart >= 0) {
                         val total = body.contentLength() // -1 nếu chunked
-                        val input = body.byteStream()
-
+                
                         // Skip rangeStart bytes
                         var skipped = 0L
                         while (skipped < rangeStart) {
@@ -234,7 +277,7 @@ object LocalHlsProxy {
                         out.write("Accept-Ranges: bytes\r\n".toByteArray())
                         out.write("Access-Control-Allow-Origin: *\r\n".toByteArray())
                         out.write("Connection: close\r\n\r\n".toByteArray())
-                        if (!method.equals("HEAD", true)) streamBody(body.byteStream(), out, null)
+                        if (!method.equals("HEAD", true)) streamBody(input, out, null)
                         out.flush()
                         return
                     }
