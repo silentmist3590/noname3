@@ -24,6 +24,7 @@ object LocalHlsProxy {
         .build()
 
     @Volatile private var logCount = 0
+    @Volatile private var segLogged = 0
     @Volatile private var playlistLogged = 0
     @Volatile private var defaultHeaders: Map<String, String> = emptyMap()
 
@@ -178,8 +179,10 @@ object LocalHlsProxy {
 
                     val out = socket.getOutputStream()
 
-                    // Case A0: 200 không Range -> bỏ phần đầu giả (ảnh/PNG...) tới khi gặp tín hiệu TS (0x47), rồi truyền NGAY
-                    if (code in 200..299 && rangeStart < 0 && ct == "video/mp2t") {
+                    // Case A0: 200 không Range -> đọc vài byte đầu để nhận dạng định dạng thật rồi truyền NGAY
+                    //  - fMP4 (CMAF): "ftyp"/"styp"/"moof"/"sidx" -> gửi Content-Type video/mp4 (máy chủ gắn nhầm video/MP2T)
+                    //  - TS giả dạng ảnh: bỏ phần đầu tới khi gặp 0x47 lặp mỗi 188 byte
+                    if (code in 200..299 && rangeStart < 0 && !ct.startsWith("text/")) {
                         val first = ByteArray(9000)
                         var n = 0
                         while (n < first.size) {
@@ -187,14 +190,20 @@ object LocalHlsProxy {
                             if (k < 0) break
                             n += k
                         }
+                        val box = if (n >= 8) String(first, 4, 4, Charsets.ISO_8859_1) else ""
+                        val isMp4 = box == "ftyp" || box == "styp" || box == "moof" || box == "sidx" || box == "emsg"
                         var off = 0
-                        if (n > 0 && first[0] != 0x47.toByte()) {
+                        var outCt = ct
+                        if (isMp4) {
+                            outCt = if (ct.startsWith("audio/")) ct else "video/mp4"
+                        } else if (ct == "video/mp2t" && n > 0 && first[0] != 0x47.toByte()) {
                             val lim = minOf(n - 376, 8192)
                             for (i in 0 until lim) {
                                 if (first[i] == 0x47.toByte() && first[i + 188] == 0x47.toByte() && first[i + 376] == 0x47.toByte()) { off = i; break }
                             }
                         }
-                        out.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n".toByteArray())
+                        if (segLogged++ < 6) ClipboardLogger.logAndCopy("SEG", "box=$box mp4=$isMp4 off=$off ct=$outCt n=$n")
+                        out.write("HTTP/1.1 200 OK\r\nContent-Type: $outCt\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n".toByteArray())
                         if (!method.equals("HEAD", true)) {
                             if (n > off) out.write(first, off, n - off)
                             out.flush()
