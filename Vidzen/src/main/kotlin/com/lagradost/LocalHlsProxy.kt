@@ -17,8 +17,9 @@ object LocalHlsProxy {
     @Volatile private var port: Int = 0
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
+        .readTimeout(120, TimeUnit.SECONDS)
         .followRedirects(true)
+        .followSslRedirects(true)
         .build()
 
     @Volatile private var defaultHeaders: Map<String, String> = emptyMap()
@@ -40,7 +41,7 @@ object LocalHlsProxy {
                         Thread({ handleRequest(socket) }, "VidZen-Proxy-Worker").apply {
                             isDaemon = true
                         }.start()
-                    } catch (e: Exception) {
+                    } catch (_: Exception) {
                         if (server?.isClosed == true) break
                     }
                 }
@@ -62,13 +63,22 @@ object LocalHlsProxy {
             socket.use {
                 val reader = socket.getInputStream().bufferedReader()
                 val requestLine = reader.readLine() ?: return
+                val requestHeaders = mutableMapOf<String, String>()
                 while (true) {
                     val h = reader.readLine() ?: break
                     if (h.isEmpty()) break
+                    val idx = h.indexOf(':')
+                    if (idx > 0) {
+                        requestHeaders[h.substring(0, idx).trim().lowercase()] =
+                            h.substring(idx + 1).trim()
+                    }
                 }
+
                 val parts = requestLine.split(" ")
                 if (parts.size < 2) return
+                val method = parts[0]
                 val uri = parts[1]
+
                 if (!uri.startsWith("/proxy")) {
                     sendError(socket, 404, "Not Found")
                     return
@@ -78,35 +88,99 @@ object LocalHlsProxy {
                     sendError(socket, 400, "Missing url")
                     return
                 }
-                Log.d(TAG, "Fetch: ${remoteUrl.take(100)}")
+                val isM3u8 = remoteUrl.contains(".m3u8", true) ||
+                             remoteUrl.contains("/api/stream/", true) ||
+                             remoteUrl.contains("v1_", true)
+                Log.d(TAG, "$method ${remoteUrl.take(100)} | range=${requestHeaders["range"] ?: "none"}")
 
+                // --- Build upstream request ---
                 val reqBuilder = Request.Builder().url(remoteUrl).get()
                 defaultHeaders.forEach { (k, v) -> reqBuilder.header(k, v) }
-                val response = httpClient.newCall(reqBuilder.build()).execute()
-                val bytes = response.body?.bytes()
-                val code = response.code
+                // Forward Range & các header quan trọng
+                listOf("range", "if-range", "if-modified-since", "if-none-match").forEach { h ->
+                    requestHeaders[h]?.let { reqBuilder.header(h.replaceFirstChar { c -> c.uppercase() }, it) }
+                }
+                // Forward user-agent nếu có
+                requestHeaders["user-agent"]?.let { reqBuilder.header("User-Agent", it) }
 
-                if (bytes == null || code !in 200..299) {
-                    Log.w(TAG, "Upstream $code for ${remoteUrl.take(80)}")
-                    sendError(socket, if (code in 100..599) code else 502, "Upstream fail")
+                val response = try {
+                    httpClient.newCall(reqBuilder.build()).execute()
+                } catch (e: Exception) {
+                    Log.e(TAG, "upstream fail: ${e.message}")
+                    sendError(socket, 502, "Upstream fail")
                     return
                 }
 
-                val contentType = response.header("Content-Type") ?: "application/octet-stream"
-                val isM3u8 = remoteUrl.contains(".m3u8", true) ||
-                             contentType.contains("mpegurl", true)
-                val finalBytes = if (isM3u8) {
-                    rewriteM3u8(String(bytes, Charsets.UTF_8), remoteUrl).toByteArray(Charsets.UTF_8)
-                } else bytes
+                val code = response.code
+                val body = response.body
+                if (body == null) {
+                    sendError(socket, 502, "No body")
+                    return
+                }
 
-                val out = socket.getOutputStream()
-                out.write("HTTP/1.1 200 OK\r\n".toByteArray())
-                out.write("Content-Type: $contentType\r\n".toByteArray())
-                out.write("Content-Length: ${finalBytes.size}\r\n".toByteArray())
-                out.write("Access-Control-Allow-Origin: *\r\n".toByteArray())
-                out.write("Connection: close\r\n\r\n".toByteArray())
-                if (!requestLine.startsWith("HEAD")) out.write(finalBytes)
-                out.flush()
+                if (isM3u8 && code in 200..299) {
+                    // ===== M3U8: rewrite URL → proxy =====
+                    val text = body.string()
+                    val rewritten = rewriteM3u8(text, remoteUrl)
+                    val bytes = rewritten.toByteArray(Charsets.UTF_8)
+                    val out = socket.getOutputStream()
+                    out.write("HTTP/1.1 200 OK\r\n".toByteArray())
+                    out.write("Content-Type: application/vnd.apple.mpegurl\r\n".toByteArray())
+                    out.write("Content-Length: ${bytes.size}\r\n".toByteArray())
+                    out.write("Accept-Ranges: bytes\r\n".toByteArray())
+                    out.write("Access-Control-Allow-Origin: *\r\n".toByteArray())
+                    out.write("Connection: close\r\n\r\n".toByteArray())
+                    if (!method.equals("HEAD", true)) out.write(bytes)
+                    out.flush()
+                } else if (code in 200..299) {
+                    // ===== SEGMENT (.ts, .m4s, .mp4): stream bytes, xử lý Range đúng =====
+                    val out = socket.getOutputStream()
+                    if (code == 206) {
+                        out.write("HTTP/1.1 206 Partial Content\r\n".toByteArray())
+                    } else {
+                        out.write("HTTP/1.1 200 OK\r\n".toByteArray())
+                    }
+                    // Content-Type
+                    val ct = when {
+                        remoteUrl.contains(".ts", true) -> "video/mp2t"
+                        remoteUrl.contains(".m4s", true) -> "video/iso.segment"
+                        remoteUrl.contains(".mp4", true) -> "video/mp4"
+                        remoteUrl.contains(".vtt", true) -> "text/vtt"
+                        remoteUrl.contains(".aac", true) -> "audio/aac"
+                        else -> response.header("Content-Type") ?: "application/octet-stream"
+                    }
+                    out.write("Content-Type: $ct\r\n".toByteArray())
+                    // Forward Content-Range nếu có
+                    response.header("Content-Range")?.let {
+                        out.write("Content-Range: $it\r\n".toByteArray())
+                    }
+                    // Content-Length
+                    val cl = response.header("Content-Length") ?: body.contentLength().takeIf { it >= 0 }?.toString()
+                    if (cl != null) out.write("Content-Length: $cl\r\n".toByteArray())
+                    out.write("Accept-Ranges: bytes\r\n".toByteArray())
+                    out.write("Access-Control-Allow-Origin: *\r\n".toByteArray())
+                    out.write("Connection: close\r\n\r\n".toByteArray())
+
+                    if (!method.equals("HEAD", true)) {
+                        // Stream từng chunk 64KB
+                        val input = body.byteStream()
+                        val buf = ByteArray(64 * 1024)
+                        var total = 0L
+                        while (true) {
+                            val n = try { input.read(buf) } catch (_: Throwable) { -1 }
+                            if (n <= 0) break
+                            out.write(buf, 0, n)
+                            total += n
+                        }
+                        out.flush()
+                        Log.d(TAG, "streamed $total bytes (code=$code)")
+                    } else {
+                        out.flush()
+                    }
+                } else {
+                    Log.w(TAG, "upstream $code for ${remoteUrl.take(80)}")
+                    sendError(socket, code, "Upstream $code")
+                }
             }
         } catch (e: Throwable) {
             Log.e(TAG, "handle fail: ${e.message}")
@@ -115,21 +189,31 @@ object LocalHlsProxy {
 
     private fun rewriteM3u8(content: String, baseUrl: String): String {
         val baseUri = try { URI(baseUrl) } catch (_: Exception) { null }
-        return content.lines().joinToString("\n") { line ->
+        val sb = StringBuilder()
+        content.lineSequence().forEachIndexed { idx, line ->
+            if (idx > 0) sb.append("\n")
             val trimmed = line.trim()
             when {
-                trimmed.isEmpty() -> line
+                trimmed.isEmpty() -> sb.append(line)
                 trimmed.startsWith("#") -> {
+                    // Rewrite URI="..." trong tag (KEY, MAP, MEDIA)
                     if (trimmed.contains("URI=\"")) {
-                        trimmed.replace(Regex("""URI="([^"]+)"""")) { match ->
-                            val abs = resolveUrl(baseUri, match.groupValues[1])
-                            """URI="${proxyUrl(abs)}""""
+                        val replaced = trimmed.replace(Regex("""URI="([^"]+)"""")) { m ->
+                            val abs = resolveUrl(baseUri, m.groupValues[1])
+                            "URI=\"${proxyUrl(abs)}\""
                         }
-                    } else line
+                        sb.append(replaced)
+                    } else {
+                        sb.append(line)
+                    }
                 }
-                else -> proxyUrl(resolveUrl(baseUri, trimmed))
+                else -> {
+                    val abs = resolveUrl(baseUri, trimmed)
+                    sb.append(proxyUrl(abs))
+                }
             }
         }
+        return sb.toString()
     }
 
     private fun resolveUrl(base: URI?, relative: String): String {
@@ -155,6 +239,7 @@ object LocalHlsProxy {
             val body = msg.toByteArray()
             val out = socket.getOutputStream()
             out.write("HTTP/1.1 $code Error\r\n".toByteArray())
+            out.write("Content-Type: text/plain\r\n".toByteArray())
             out.write("Content-Length: ${body.size}\r\n".toByteArray())
             out.write("Connection: close\r\n\r\n".toByteArray())
             out.write(body)
