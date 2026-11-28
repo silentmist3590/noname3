@@ -12,7 +12,7 @@ include(":Tvhay")
 include(":Vidlux")
 include(":Vidnet")
 include(":Vidzen")
-
+include(":TubiTV")
 
 
 pluginManagement {
