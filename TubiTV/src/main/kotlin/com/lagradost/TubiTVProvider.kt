@@ -16,8 +16,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -190,24 +188,33 @@ class TubiTVProvider : MainAPI() {
         rawUrl: String,
         referer: String = "$mainUrl/",
         timeoutSec: Long = 15L
-    ): HttpFetchResult = withContext(Dispatchers.IO) {
+    ): HttpFetchResult {
         val relayUrl = resolveRelayUrl()
         val proxySpec = resolveProxySpec()
         val finalUrl = applyRelayIfConfigured(rawUrl)
 
-        try {
+        return try {
             if (relayUrl.isBlank() && proxySpec.isBlank()) {
                 val resp = app.get(finalUrl, headers = tubiHeaders(referer), timeout = timeoutSec)
                 val body = resp.text
-                return@withContext HttpFetchResult(resp.code, body, looksGeoBlocked(resp.code, body))
-            }
-
-            val client = getOkHttpClient(proxySpec)
-            val reqBuilder = Request.Builder().url(finalUrl)
-            tubiHeaders(referer).forEach { (k, v) -> reqBuilder.header(k, v) }
-            client.newCall(reqBuilder.build()).execute().use { resp ->
-                val body = resp.body?.string() ?: ""
-                return@withContext HttpFetchResult(resp.code, body, looksGeoBlocked(resp.code, body))
+                HttpFetchResult(resp.code, body, looksGeoBlocked(resp.code, body))
+            } else {
+                suspendCoroutine { cont ->
+                    Thread {
+                        try {
+                            val client = getOkHttpClient(proxySpec)
+                            val reqBuilder = Request.Builder().url(finalUrl)
+                            tubiHeaders(referer).forEach { (k, v) -> reqBuilder.header(k, v) }
+                            client.newCall(reqBuilder.build()).execute().use { resp ->
+                                val body = resp.body?.string() ?: ""
+                                cont.resume(HttpFetchResult(resp.code, body, looksGeoBlocked(resp.code, body)))
+                            }
+                        } catch (e: Exception) {
+                            ClipboardLogger.logAndCopy("HTTP Err", "${rawUrl.take(90)} -> ${e.message}")
+                            cont.resume(HttpFetchResult(0, "", false))
+                        }
+                    }.apply { isDaemon = true }.start()
+                }
             }
         } catch (e: Exception) {
             ClipboardLogger.logAndCopy("HTTP Err", "${rawUrl.take(90)} -> ${e.message}")
